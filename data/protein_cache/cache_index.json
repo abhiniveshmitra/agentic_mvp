@@ -1,0 +1,17 @@
+{
+  "1M17_pdb": {
+    "structure_path": "C:\\Users\\abhin\\OneDrive\\Desktop\\antigravity-mvp\\mvp\\data\\protein_cache\\1M17.pdb",
+    "fetched_at": "2025-12-31T13:08:30.690740",
+    "confidence_regions": {}
+  },
+  "3OG7_pdb": {
+    "structure_path": "C:\\Users\\abhin\\OneDrive\\Desktop\\antigravity-mvp\\mvp\\data\\protein_cache\\3OG7.pdb",
+    "fetched_at": "2025-12-31T13:08:34.302706",
+    "confidence_regions": {}
+  },
+  "1HWK_pdb": {
+    "structure_path": "C:\\Users\\abhin\\OneDrive\\Desktop\\antigravity-mvp\\mvp\\data\\protein_cache\\1HWK.pdb",
+    "fetched_at": "2025-12-31T13:08:38.877323",
+    "confidence_regions": {}
+  }
+}

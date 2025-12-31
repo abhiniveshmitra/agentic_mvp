@@ -50,81 +50,85 @@ def encode_protein(sequence: str, max_len: int = 1000) -> np.ndarray:
     return encoding
 
 
-class DeepDTAModel(nn.Module):
-    """
-    DeepDTA architecture for drug-target affinity prediction.
-    
-    Based on: Öztürk et al., "DeepDTA: deep drug-target binding affinity prediction"
-    Bioinformatics, 2018.
-    """
-    
-    def __init__(
-        self,
-        smiles_vocab_size: int = 64,
-        protein_vocab_size: int = 26,
-        embed_dim: int = 128,
-        num_filters: int = 32,
-        filter_lengths: list = None,
-    ):
-        super().__init__()
+if HAS_TORCH:
+    class DeepDTAModel(nn.Module):
+        """
+        DeepDTA architecture for drug-target affinity prediction.
         
-        filter_lengths = filter_lengths or [4, 6, 8]
+        Based on: Öztürk et al., "DeepDTA: deep drug-target binding affinity prediction"
+        Bioinformatics, 2018.
+        """
         
-        # Drug (SMILES) embedding and CNN
-        self.drug_embed = nn.Embedding(smiles_vocab_size, embed_dim)
-        self.drug_convs = nn.ModuleList([
-            nn.Conv1d(embed_dim, num_filters * 2, k, padding=k // 2)
-            for k in filter_lengths
-        ])
-        self.drug_pool = nn.AdaptiveMaxPool1d(1)
+        def __init__(
+            self,
+            smiles_vocab_size: int = 64,
+            protein_vocab_size: int = 26,
+            embed_dim: int = 128,
+            num_filters: int = 32,
+            filter_lengths: list = None,
+        ):
+            super().__init__()
+            
+            filter_lengths = filter_lengths or [4, 6, 8]
+            
+            # Drug (SMILES) embedding and CNN
+            self.drug_embed = nn.Embedding(smiles_vocab_size, embed_dim)
+            self.drug_convs = nn.ModuleList([
+                nn.Conv1d(embed_dim, num_filters * 2, k, padding=k // 2)
+                for k in filter_lengths
+            ])
+            self.drug_pool = nn.AdaptiveMaxPool1d(1)
+            
+            # Protein embedding and CNN
+            self.protein_embed = nn.Embedding(protein_vocab_size, embed_dim)
+            self.protein_convs = nn.ModuleList([
+                nn.Conv1d(embed_dim, num_filters * 2, k, padding=k // 2)
+                for k in filter_lengths
+            ])
+            self.protein_pool = nn.AdaptiveMaxPool1d(1)
+            
+            # Combined layers
+            combined_size = len(filter_lengths) * num_filters * 2 * 2
+            self.fc1 = nn.Linear(combined_size, 1024)
+            self.fc2 = nn.Linear(1024, 512)
+            self.fc3 = nn.Linear(512, 1)
+            
+            self.dropout = nn.Dropout(0.1)
+            self.relu = nn.ReLU()
         
-        # Protein embedding and CNN
-        self.protein_embed = nn.Embedding(protein_vocab_size, embed_dim)
-        self.protein_convs = nn.ModuleList([
-            nn.Conv1d(embed_dim, num_filters * 2, k, padding=k // 2)
-            for k in filter_lengths
-        ])
-        self.protein_pool = nn.AdaptiveMaxPool1d(1)
-        
-        # Combined layers
-        combined_size = len(filter_lengths) * num_filters * 2 * 2
-        self.fc1 = nn.Linear(combined_size, 1024)
-        self.fc2 = nn.Linear(1024, 512)
-        self.fc3 = nn.Linear(512, 1)
-        
-        self.dropout = nn.Dropout(0.1)
-        self.relu = nn.ReLU()
-    
-    def forward(self, drug: torch.Tensor, protein: torch.Tensor) -> torch.Tensor:
-        # Drug branch
-        drug_x = self.drug_embed(drug)  # (batch, seq_len, embed)
-        drug_x = drug_x.permute(0, 2, 1)  # (batch, embed, seq_len)
-        
-        drug_features = []
-        for conv in self.drug_convs:
-            x = self.relu(conv(drug_x))
-            x = self.drug_pool(x).squeeze(-1)
-            drug_features.append(x)
-        drug_out = torch.cat(drug_features, dim=1)
-        
-        # Protein branch
-        prot_x = self.protein_embed(protein)
-        prot_x = prot_x.permute(0, 2, 1)
-        
-        prot_features = []
-        for conv in self.protein_convs:
-            x = self.relu(conv(prot_x))
-            x = self.protein_pool(x).squeeze(-1)
-            prot_features.append(x)
-        prot_out = torch.cat(prot_features, dim=1)
-        
-        # Combined
-        combined = torch.cat([drug_out, prot_out], dim=1)
-        x = self.dropout(self.relu(self.fc1(combined)))
-        x = self.dropout(self.relu(self.fc2(x)))
-        out = self.fc3(x)
-        
-        return out
+        def forward(self, drug: torch.Tensor, protein: torch.Tensor) -> torch.Tensor:
+            # Drug branch
+            drug_x = self.drug_embed(drug)  # (batch, seq_len, embed)
+            drug_x = drug_x.permute(0, 2, 1)  # (batch, embed, seq_len)
+            
+            drug_features = []
+            for conv in self.drug_convs:
+                x = self.relu(conv(drug_x))
+                x = self.drug_pool(x).squeeze(-1)
+                drug_features.append(x)
+            drug_out = torch.cat(drug_features, dim=1)
+            
+            # Protein branch
+            prot_x = self.protein_embed(protein)
+            prot_x = prot_x.permute(0, 2, 1)
+            
+            prot_features = []
+            for conv in self.protein_convs:
+                x = self.relu(conv(prot_x))
+                x = self.protein_pool(x).squeeze(-1)
+                prot_features.append(x)
+            prot_out = torch.cat(prot_features, dim=1)
+            
+            # Combined
+            combined = torch.cat([drug_out, prot_out], dim=1)
+            x = self.dropout(self.relu(self.fc1(combined)))
+            x = self.dropout(self.relu(self.fc2(x)))
+            out = self.fc3(x)
+            
+            return out
+else:
+    # Placeholder when torch is not available
+    DeepDTAModel = None
 
 
 class DeepDTAScorer:
