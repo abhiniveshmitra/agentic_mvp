@@ -33,6 +33,13 @@ logger = get_logger(__name__)
 # Vina executable path (relative to project root)
 VINA_PATH = Path(__file__).parent.parent.parent / "tools" / "vina" / "vina.exe"
 
+# Cross-target warning (MUST include in all user-facing outputs)
+CROSS_TARGET_WARNING = (
+    "Vina score thresholds are heuristic and target-dependent. "
+    "Scores are interpreted qualitatively and should not be compared "
+    "across different protein targets."
+)
+
 
 @dataclass
 class DockingExplanation:
@@ -247,6 +254,18 @@ class DockingAgent:
     
     def _smiles_to_pdbqt(self, smiles: str) -> Optional[Path]:
         """Convert SMILES to PDBQT format for docking."""
+        # Try using OpenBabel if available (proper PDBQT with charges)
+        try:
+            from stage2.docking.pdbqt_prep import prepare_ligand_pdbqt, check_openbabel_available
+            if check_openbabel_available():
+                result = prepare_ligand_pdbqt(smiles)
+                if result:
+                    logger.info(f"Ligand PDBQT prepared via OpenBabel")
+                    return result
+        except ImportError:
+            pass
+        
+        # Fallback to RDKit-only (PDB format - not ideal, charges missing)
         try:
             from rdkit import Chem
             from rdkit.Chem import AllChem
@@ -275,21 +294,34 @@ class DockingAgent:
                 pdb_path = f.name
                 Chem.MolToPDBFile(mol, pdb_path)
             
-            # For now, return PDB path (Vina can work with PDB for ligands)
-            # In production, would convert to PDBQT
+            logger.warning("Using RDKit PDB fallback - no partial charges (OpenBabel not available)")
             return Path(pdb_path)
             
         except Exception as e:
             logger.error(f"SMILES to PDBQT conversion failed: {e}")
             return None
+
     
     def _protein_to_pdbqt(self, protein_path: Path) -> Optional[Path]:
         """Prepare protein PDB to PDBQT format."""
-        # For MVP, we use PDB directly
-        # Full implementation would use MGLTools or OpenBabel
         if not protein_path.exists():
             return None
+        
+        # Try using OpenBabel if available (proper PDBQT with charges)
+        try:
+            from stage2.docking.pdbqt_prep import prepare_receptor_pdbqt, check_openbabel_available
+            if check_openbabel_available():
+                result = prepare_receptor_pdbqt(protein_path)
+                if result:
+                    logger.info(f"Receptor PDBQT prepared via OpenBabel")
+                    return result
+        except ImportError:
+            pass
+        
+        # Fallback: use PDB directly (not ideal, charges missing)
+        logger.warning("Using PDB fallback for receptor - no partial charges (OpenBabel not available)")
         return protein_path
+
     
     def _run_vina(
         self,
@@ -581,8 +613,9 @@ class DockingAgent:
         limitations = [
             "Protein treated as rigid",
             "Solvent effects not explicitly modeled",
-            "Docking score is not equivalent to binding free energy",
+            "Vina score is a scoring-function estimate, NOT thermodynamic ΔG",
             "Results are structural plausibility checks only",
+            CROSS_TARGET_WARNING,
         ]
         
         if is_mock:

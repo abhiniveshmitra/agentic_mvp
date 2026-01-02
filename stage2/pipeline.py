@@ -226,11 +226,13 @@ class Stage2Pipeline:
         This requires MGLTools (prepare_receptor/prepare_ligand) or OpenBabel.
         
         Returns:
-            False in MVP (tools not installed), True when tools available
+            True if OpenBabel is available, False otherwise
         """
-        # MVP: PDBQT preparation not yet available
-        # Future: Check for obabel or MGLTools in PATH
-        return False
+        try:
+            from stage2.docking.pdbqt_prep import check_openbabel_available
+            return check_openbabel_available()
+        except ImportError:
+            return False
     
     def _get_docking_unavailable_reason(self, prepared_protein) -> str:
         """
