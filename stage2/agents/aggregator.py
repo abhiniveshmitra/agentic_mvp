@@ -22,12 +22,14 @@ from stage2.agents.topk_selection import TopKCandidate
 from stage2.agents.docking import DockingResult
 from stage2.agents.adme_tox_stage2 import ADMEToxStage2Result
 from stage2.agents.patent_stub import PatentRiskResult
+from stage2.agents.ml_refinement import MLRefinementResult
 
 logger = get_logger(__name__)
 
 # Version info
 STAGE1_VERSION = "phase1-stable"
 STAGE2_VERSION = "1.0.0"
+STAGE3_VERSION = "phase3-ml-integration"  # ML refinement layer
 
 
 @dataclass
@@ -72,6 +74,7 @@ class Stage2Aggregator:
         docking_result: Optional[DockingResult] = None,
         adme_tox_result: Optional[ADMEToxStage2Result] = None,
         patent_result: Optional[PatentRiskResult] = None,
+        ml_refinement_result: Optional[MLRefinementResult] = None,
     ) -> AggregatedCandidate:
         """
         Aggregate all Stage-2 results for a candidate.
@@ -81,6 +84,7 @@ class Stage2Aggregator:
             docking_result: Docking result (optional)
             adme_tox_result: ADME/Tox result (optional)
             patent_result: Patent risk result (optional)
+            ml_refinement_result: ML refinement result (optional)
         
         Returns:
             AggregatedCandidate with all evidence
@@ -109,7 +113,19 @@ class Stage2Aggregator:
         if patent_result:
             stage2["patent"] = patent_result.to_dict()
         else:
-            stage2["patent"] = {"status": "NOT_Run"}
+            stage2["patent"] = {"status": "NOT_RUN"}
+        
+        # ML Refinement (Level-4, annotation only)
+        if ml_refinement_result:
+            stage2["ml_refinement"] = {
+                "label": "ML-derived refinement signal",
+                **ml_refinement_result.to_dict(),
+            }
+        else:
+            stage2["ml_refinement"] = {
+                "label": "ML-derived refinement signal",
+                "ml_status": "NOT_RUN",
+            }
         
         # Generate narrative (can be enhanced with Gemini later)
         narrative = self._generate_narrative(
@@ -117,6 +133,7 @@ class Stage2Aggregator:
             docking_result=docking_result,
             adme_tox_result=adme_tox_result,
             patent_result=patent_result,
+            ml_refinement_result=ml_refinement_result,
         )
         
         # Provenance
@@ -143,6 +160,7 @@ class Stage2Aggregator:
         docking_results: Optional[List[DockingResult]] = None,
         adme_tox_results: Optional[List[ADMEToxStage2Result]] = None,
         patent_results: Optional[List[PatentRiskResult]] = None,
+        ml_refinement_results: Optional[List[MLRefinementResult]] = None,
     ) -> List[AggregatedCandidate]:
         """
         Aggregate results for a batch of candidates.
@@ -152,6 +170,7 @@ class Stage2Aggregator:
             docking_results: List of docking results (same order)
             adme_tox_results: List of ADME/Tox results (same order)
             patent_results: List of patent results (same order)
+            ml_refinement_results: List of ML refinement results (same order)
         
         Returns:
             List of AggregatedCandidate objects
@@ -162,12 +181,14 @@ class Stage2Aggregator:
             docking = docking_results[i] if docking_results and i < len(docking_results) else None
             adme = adme_tox_results[i] if adme_tox_results and i < len(adme_tox_results) else None
             patent = patent_results[i] if patent_results and i < len(patent_results) else None
+            ml_ref = ml_refinement_results[i] if ml_refinement_results and i < len(ml_refinement_results) else None
             
             aggregated = self.aggregate(
                 topk_candidate=topk,
                 docking_result=docking,
                 adme_tox_result=adme,
                 patent_result=patent,
+                ml_refinement_result=ml_ref,
             )
             results.append(aggregated)
         
@@ -181,6 +202,7 @@ class Stage2Aggregator:
         docking_result: Optional[DockingResult],
         adme_tox_result: Optional[ADMEToxStage2Result],
         patent_result: Optional[PatentRiskResult],
+        ml_refinement_result: Optional[MLRefinementResult] = None,
     ) -> str:
         """
         Generate human-readable narrative summary.
@@ -245,6 +267,22 @@ class Stage2Aggregator:
                 parts.append(
                     "Patent analysis deferred in MVP. Professional IP review recommended "
                     "before development."
+                )
+        
+        # ML refinement summary (Level-4, annotation only)
+        if ml_refinement_result:
+            if ml_refinement_result.ml_status == "APPLIED":
+                score = ml_refinement_result.ml_affinity_score or 0
+                uncertainty = ml_refinement_result.ml_uncertainty or 0
+                parts.append(
+                    f"ML ensemble predicts pIC50 = {score:.2f} ± {uncertainty:.2f}. "
+                    "This is a refinement signal reflecting model agreement, not experimental data."
+                )
+            elif ml_refinement_result.ml_status == "NOT_APPLICABLE":
+                reason = ml_refinement_result.reason or "upstream FAIL status"
+                parts.append(
+                    f"ML refinement not applied ({reason}). "
+                    "ML is a Level-4 signal and cannot override upstream decisions."
                 )
         
         return " ".join(parts)

@@ -85,6 +85,23 @@ MODELS = {
         "max_drug_len": 100,
         "max_protein_len": 1000,
     },
+    "gat": {
+        "version": "1.0",
+        "checkpoint_path": MODELS_DIR / "checkpoints" / "gat.pt",
+        "num_layers": 2,
+        "num_heads": 4,
+        "hidden_channels": 64,
+    },
+    "xgboost": {
+        "version": "1.0",
+        "checkpoint_path": MODELS_DIR / "checkpoints" / "xgb_ecfp.joblib",
+        "fp_radius": 2,
+        "fp_bits": 2048,
+    },
+    "ensemble": {
+        "enabled": True,
+        "models": ["deepdta", "gat", "xgboost"],
+    },
 }
 
 # =============================================================================

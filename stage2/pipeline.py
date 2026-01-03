@@ -1,14 +1,15 @@
 """
 Stage-2 Pipeline Orchestrator.
 
-Runs the complete Stage-2 pipeline in the correct order:
+Runs the complete Stage-2/3 pipeline in the correct order:
 1. Input Lock (verify Stage-1)
 2. Top-K Selection
 3. Protein Preparation
 4. Docking (parallel)
 5. ADME/Tox Flags
-6. Patent Risk (stub)
-7. Aggregation & Output
+6. ML Refinement (Level-4, Phase-3)
+7. Patent Risk (stub)
+8. Aggregation & Output
 
 This orchestrator enforces execution order and provenance.
 """
@@ -22,8 +23,9 @@ from utils.logging import get_logger
 from stage2.agents.topk_selection import TopKSelector, TopKCandidate
 from stage2.agents.protein_prep import ProteinPreparator, PreparedProtein
 from stage2.agents.docking import DockingAgent, DockingResult
-from stage2.agents.adme_tox_stage2 import ADMEToxStage2, ADMEToxStage2Result
+from stage2.agents.adme_tox_stage2 import ADMEToxStage2, ADMEToxStage2Result, Stage2RiskLevel
 from stage2.agents.patent_stub import PatentRiskStub, PatentRiskResult
+from stage2.agents.ml_refinement import MLRefinementAgent, MLRefinementResult
 from stage2.agents.aggregator import Stage2Aggregator, AggregatedCandidate
 
 logger = get_logger(__name__)
@@ -58,6 +60,9 @@ class Stage2Pipeline:
         self.protein_prep = ProteinPreparator(cache_dir=protein_cache_dir)
         self.docking = DockingAgent(vina_path=vina_path)
         self.adme_tox = ADMEToxStage2()
+        # Phase-3 ML Refinement: require_scorer=False for graceful degradation
+        # (returns NOT_APPLICABLE if deps unavailable rather than crashing pipeline)
+        self.ml_refinement = MLRefinementAgent(require_scorer=False)
         self.patent = PatentRiskStub()
         self.aggregator = Stage2Aggregator()
         
@@ -159,8 +164,34 @@ class Stage2Pipeline:
             )
             adme_results.append(result)
         
-        # Step 5: Patent Risk (Stub)
-        logger.info("Step 5: Patent Risk (Stub)")
+        # Step 5: ML Refinement (Level-4, Phase-3)
+        # HARD FAIL BOUNDARIES: Skip if ADME HIGH_RISK or Docking FAIL
+        logger.info("Step 5: ML Refinement (Phase-3)")
+        ml_results = []
+        
+        # Get protein sequence for ML (from prepared protein if available)
+        protein_sequence = prepared_protein.sequence or protein_id
+        
+        for i, candidate in enumerate(topk_candidates):
+            # Get upstream status for boundary check
+            adme_status = adme_results[i].label.value if adme_results[i] else "SAFE"
+            docking_status = docking_results[i].docking_status if docking_results[i] else "NOT_EVALUATED"
+            
+            result = self.ml_refinement.score(
+                smiles=candidate.smiles,
+                compound_id=candidate.compound_id,
+                protein_sequence=protein_sequence,
+                adme_status=adme_status,
+                docking_status=docking_status,
+            )
+            ml_results.append(result)
+        
+        ml_applied = sum(1 for r in ml_results if r.ml_status == "APPLIED")
+        ml_skipped = len(ml_results) - ml_applied
+        logger.info(f"  ML: {ml_applied} APPLIED, {ml_skipped} NOT_APPLICABLE")
+        
+        # Step 6: Patent Risk (Stub)
+        logger.info("Step 6: Patent Risk (Stub)")
         patent_results = []
         
         for candidate in topk_candidates:
@@ -170,13 +201,14 @@ class Stage2Pipeline:
             )
             patent_results.append(result)
         
-        # Step 6: Aggregation
-        logger.info("Step 6: Aggregation")
+        # Step 7: Aggregation
+        logger.info("Step 7: Aggregation")
         aggregated = self.aggregator.aggregate_batch(
             topk_candidates=topk_candidates,
             docking_results=docking_results,
             adme_tox_results=adme_results,
             patent_results=patent_results,
+            ml_refinement_results=ml_results,
         )
         
         end_time = datetime.now()

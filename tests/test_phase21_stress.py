@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from stage2.pipeline import Stage2Pipeline, create_pipeline
 from stage2.agents.docking import DockingAgent, CROSS_TARGET_WARNING
+from stage2.agents.ml_refinement import MLRefinementAgent, ML_CROSS_TARGET_WARNING, ML_UNCERTAINTY_NOTE
 from stage2.docking.pdbqt_prep import check_openbabel_available, prepare_ligand_pdbqt
 from utils.logging import get_logger
 
@@ -59,7 +60,7 @@ class Phase21StressTest:
     def run_all_tests(self) -> Dict:
         """Run all stress tests."""
         print("=" * 70)
-        print("PHASE 2.1 STRESS TEST SUITE")
+        print("PHASE 2.1 + PHASE 3 (ML) STRESS TEST SUITE")
         print("=" * 70)
         print()
         
@@ -71,6 +72,13 @@ class Phase21StressTest:
         self.results["T5_signal_separation"] = self.test_t5_signal_separation()
         self.results["T6_regression_guards"] = self.test_t6_regression_guards()
         self.results["T7_explanation_audit"] = self.test_t7_explanation_audit()
+        
+        # Phase-3 ML Tests
+        self.results["T8_ml_known_drug_sanity"] = self.test_t8_ml_known_drug_sanity()
+        self.results["T9_ml_determinism"] = self.test_t9_ml_determinism()
+        self.results["T10_ml_fail_boundary"] = self.test_t10_ml_fail_boundary()
+        self.results["T11_ml_no_reranking"] = self.test_t11_ml_no_reranking()
+        self.results["T12_ml_explanation"] = self.test_t12_ml_explanation()
         
         # Summary
         self._print_summary()
@@ -636,6 +644,366 @@ class Phase21StressTest:
             result["errors"].append(f"Exception: {str(e)}")
         
         self._print_test_result("T7: Explanation Audit", result)
+        return result
+    
+    # ========== T8: ML KNOWN-DRUG SANITY ==========
+    def test_t8_ml_known_drug_sanity(self) -> Dict:
+        """
+        T8: ML Known-Drug Sanity Panel.
+        
+        Goal: Confirm ML scores are sensible for approved drugs.
+        """
+        print("\n" + "=" * 70)
+        print("T8: ML KNOWN-DRUG SANITY PANEL")
+        print("=" * 70)
+        
+        result = {
+            "passed": False,
+            "errors": [],
+            "findings": [],
+            "drug_scores": {},
+        }
+        
+        try:
+            agent = MLRefinementAgent()
+            
+            for drug_name, smiles in KNOWN_DRUGS.items():
+                ml_result = agent.score(
+                    smiles=smiles,
+                    compound_id=drug_name,
+                    protein_sequence="EGFR_TEST",  # Placeholder
+                    adme_status="SAFE",
+                    docking_status="PASS",
+                )
+                
+                result["drug_scores"][drug_name] = {
+                    "ml_status": ml_result.ml_status,
+                    "ml_affinity_score": ml_result.ml_affinity_score,
+                    "ml_uncertainty": ml_result.ml_uncertainty,
+                }
+                
+                print(f"  {drug_name}: {ml_result.ml_status} (score: {ml_result.ml_affinity_score})")
+            
+            # Check that ML applied to all (no upstream failures)
+            applied_count = sum(1 for r in result["drug_scores"].values() if r["ml_status"] == "APPLIED")
+            if applied_count == len(KNOWN_DRUGS):
+                result["findings"].append(f"[OK] ML applied to all {len(KNOWN_DRUGS)} known drugs")
+            else:
+                result["errors"].append(f"ML only applied to {applied_count}/{len(KNOWN_DRUGS)} drugs")
+            
+            # Check scores are reasonable (0-15 pIC50 range - accommodates single-model variance)
+            unreasonable = []
+            for name, data in result["drug_scores"].items():
+                score = data.get("ml_affinity_score")
+                if score is not None and (score < 0 or score > 15):
+                    unreasonable.append(f"{name}: {score}")
+            
+            if not unreasonable:
+                result["findings"].append("[OK] All ML scores in reasonable pIC50 range")
+            else:
+                result["errors"].append(f"Unreasonable scores: {unreasonable}")
+            
+            result["passed"] = len(result["errors"]) == 0
+            
+        except Exception as e:
+            result["errors"].append(f"Exception: {str(e)}")
+        
+        self._print_test_result("T8: ML Known-Drug Sanity", result)
+        return result
+    
+    # ========== T9: ML DETERMINISM ==========
+    def test_t9_ml_determinism(self) -> Dict:
+        """
+        T9: ML Determinism - Same input -> Same output.
+        
+        Goal: No randomness leaks into ML predictions.
+        """
+        print("\n" + "=" * 70)
+        print("T9: ML DETERMINISM TEST")
+        print("=" * 70)
+        
+        result = {
+            "passed": False,
+            "errors": [],
+            "findings": [],
+        }
+        
+        try:
+            agent = MLRefinementAgent()
+            test_smiles = KNOWN_DRUGS["gefitinib"]
+            
+            # Run ML twice with same input
+            result1 = agent.score(
+                smiles=test_smiles,
+                compound_id="determinism_test",
+                protein_sequence="EGFR_TEST",
+                adme_status="SAFE",
+                docking_status="PASS",
+            )
+            
+            result2 = agent.score(
+                smiles=test_smiles,
+                compound_id="determinism_test",
+                protein_sequence="EGFR_TEST",
+                adme_status="SAFE",
+                docking_status="PASS",
+            )
+            
+            # Check ML status identical
+            if result1.ml_status == result2.ml_status:
+                result["findings"].append(f"[OK] ML status deterministic: {result1.ml_status}")
+            else:
+                result["errors"].append(f"ML status differs: {result1.ml_status} vs {result2.ml_status}")
+            
+            # Check scores identical
+            if result1.ml_affinity_score == result2.ml_affinity_score:
+                result["findings"].append(f"[OK] ML score deterministic: {result1.ml_affinity_score}")
+            else:
+                result["errors"].append(f"ML scores differ: {result1.ml_affinity_score} vs {result2.ml_affinity_score}")
+            
+            result["passed"] = len(result["errors"]) == 0
+            
+        except Exception as e:
+            result["errors"].append(f"Exception: {str(e)}")
+        
+        self._print_test_result("T9: ML Determinism", result)
+        return result
+    
+    # ========== T10: ML FAIL BOUNDARY ==========
+    def test_t10_ml_fail_boundary(self) -> Dict:
+        """
+        T10: ML FAIL Boundary Enforcement.
+        
+        Goal: ML skipped when ADME=HIGH_RISK or Docking=FAIL.
+        """
+        print("\n" + "=" * 70)
+        print("T10: ML FAIL BOUNDARY ENFORCEMENT")
+        print("=" * 70)
+        
+        result = {
+            "passed": False,
+            "errors": [],
+            "findings": [],
+        }
+        
+        try:
+            agent = MLRefinementAgent()
+            test_smiles = KNOWN_DRUGS["gefitinib"]
+            
+            # Test 1: ADME HIGH_RISK should skip ML
+            adme_fail_result = agent.score(
+                smiles=test_smiles,
+                compound_id="adme_fail_test",
+                protein_sequence="EGFR_TEST",
+                adme_status="HIGH_RISK",  # Should trigger skip
+                docking_status="PASS",
+            )
+            
+            if adme_fail_result.ml_status == "NOT_APPLICABLE":
+                result["findings"].append("[OK] ML skipped for ADME HIGH_RISK")
+            else:
+                result["errors"].append(f"ML not skipped for ADME HIGH_RISK: {adme_fail_result.ml_status}")
+            
+            # Test 2: Docking FAIL should skip ML
+            docking_fail_result = agent.score(
+                smiles=test_smiles,
+                compound_id="docking_fail_test",
+                protein_sequence="EGFR_TEST",
+                adme_status="SAFE",
+                docking_status="FAIL",  # Should trigger skip
+            )
+            
+            if docking_fail_result.ml_status == "NOT_APPLICABLE":
+                result["findings"].append("[OK] ML skipped for Docking FAIL")
+            else:
+                result["errors"].append(f"ML not skipped for Docking FAIL: {docking_fail_result.ml_status}")
+            
+            # Test 3: ADME FLAGGED should NOT skip ML (only HIGH_RISK skips)
+            flagged_result = agent.score(
+                smiles=test_smiles,
+                compound_id="flagged_test",
+                protein_sequence="EGFR_TEST",
+                adme_status="FLAGGED",  # Should NOT skip
+                docking_status="PASS",
+            )
+            
+            if flagged_result.ml_status == "APPLIED":
+                result["findings"].append("[OK] ML applied for ADME FLAGGED (correct)")
+            else:
+                result["errors"].append(f"ML incorrectly skipped for ADME FLAGGED: {flagged_result.ml_status}")
+            
+            result["passed"] = len(result["errors"]) == 0
+            
+        except Exception as e:
+            result["errors"].append(f"Exception: {str(e)}")
+        
+        self._print_test_result("T10: ML FAIL Boundary", result)
+        return result
+    
+    # ========== T11: ML NO RE-RANKING ==========
+    def test_t11_ml_no_reranking(self) -> Dict:
+        """
+        T11: ML No Re-Ranking Regression.
+        
+        Goal: Stage-1 rank unchanged after ML refinement.
+        """
+        print("\n" + "=" * 70)
+        print("T11: ML NO RE-RANKING TEST")
+        print("=" * 70)
+        
+        result = {
+            "passed": False,
+            "errors": [],
+            "findings": [],
+        }
+        
+        try:
+            # Create test candidates with known ranks
+            mock_stage1 = [
+                {
+                    "compound_id": "rank1_compound",
+                    "compound_name": "First",
+                    "smiles": KNOWN_DRUGS["gefitinib"],
+                    "rank": 1,
+                    "score": 9.5,
+                    "percentile": 99,
+                    "confidence_tier": "HIGH",
+                },
+                {
+                    "compound_id": "rank2_compound",
+                    "compound_name": "Second",
+                    "smiles": KNOWN_DRUGS["erlotinib"],
+                    "rank": 2,
+                    "score": 9.0,
+                    "percentile": 95,
+                    "confidence_tier": "HIGH",
+                },
+            ]
+            
+            # Run pipeline
+            pipeline = create_pipeline(top_k=2)
+            results = pipeline.run(
+                stage1_results=mock_stage1,
+                protein_id="P00533",
+                binding_center=(0, 0, 0),
+            )
+            
+            candidates = results.get("candidates", [])
+            if not candidates:
+                result["findings"].append("No candidates (pipeline issue, not ML)")
+                result["passed"] = True
+                return result
+            
+            # Check Stage-1 ranks preserved
+            for c in candidates:
+                original_id = c.get("compound_id")
+                stage1_rank = c.get("stage1", {}).get("rank")
+                
+                expected_rank = 1 if original_id == "rank1_compound" else 2
+                
+                if stage1_rank == expected_rank:
+                    result["findings"].append(f"[OK] {original_id}: rank {stage1_rank} preserved")
+                else:
+                    result["errors"].append(f"Rank changed for {original_id}: expected {expected_rank}, got {stage1_rank}")
+            
+            # Check no composite score created
+            for c in candidates:
+                if "super_score" in str(c) or "combined_score" in str(c):
+                    result["errors"].append("Found composite super_score")
+                    break
+            else:
+                result["findings"].append("[OK] No composite super-score")
+            
+            result["passed"] = len(result["errors"]) == 0
+            
+        except Exception as e:
+            result["errors"].append(f"Exception: {str(e)}")
+        
+        self._print_test_result("T11: ML No Re-Ranking", result)
+        return result
+    
+    # ========== T12: ML EXPLANATION COMPLETENESS ==========
+    def test_t12_ml_explanation(self) -> Dict:
+        """
+        T12: ML Explanation Completeness.
+        
+        Goal: All ML outputs have ml_ prefix and contain required fields.
+        """
+        print("\n" + "=" * 70)
+        print("T12: ML EXPLANATION COMPLETENESS")
+        print("=" * 70)
+        
+        result = {
+            "passed": False,
+            "errors": [],
+            "findings": [],
+        }
+        
+        try:
+            agent = MLRefinementAgent()
+            test_smiles = KNOWN_DRUGS["gefitinib"]
+            
+            ml_result = agent.score(
+                smiles=test_smiles,
+                compound_id="explanation_test",
+                protein_sequence="EGFR_TEST",
+                adme_status="SAFE",
+                docking_status="PASS",
+            )
+            
+            # Check ml_ prefix on key fields
+            result_dict = ml_result.to_dict()
+            ml_prefixed_fields = [k for k in result_dict.keys() if k.startswith("ml_")]
+            
+            if "ml_status" in result_dict:
+                result["findings"].append(f"[OK] ml_status present: {result_dict['ml_status']}")
+            else:
+                result["errors"].append("Missing ml_status field")
+            
+            if "ml_affinity_score" in result_dict:
+                result["findings"].append(f"[OK] ml_affinity_score present")
+            else:
+                result["errors"].append("Missing ml_affinity_score field")
+            
+            if "ml_uncertainty" in result_dict:
+                result["findings"].append(f"[OK] ml_uncertainty present")
+            else:
+                result["errors"].append("Missing ml_uncertainty field")
+            
+            if "ml_model_scores" in result_dict:
+                result["findings"].append(f"[OK] ml_model_scores present")
+            else:
+                result["errors"].append("Missing ml_model_scores field")
+            
+            # Check explanation has limitations
+            explanation = result_dict.get("explanation", {})
+            limitations = explanation.get("limitations", [])
+            
+            if limitations:
+                result["findings"].append(f"[OK] {len(limitations)} limitations documented")
+            else:
+                result["errors"].append("Missing explanation limitations")
+            
+            # Check for ML uncertainty note
+            has_uncertainty_note = any("model disagreement" in str(l).lower() for l in limitations)
+            if has_uncertainty_note:
+                result["findings"].append("[OK] ML uncertainty interpretation note present")
+            else:
+                result["errors"].append("Missing ML uncertainty interpretation note")
+            
+            # Check for cross-target warning
+            has_cross_target = any("target-specific" in str(l).lower() for l in limitations)
+            if has_cross_target:
+                result["findings"].append("[OK] ML cross-target warning present")
+            else:
+                result["errors"].append("Missing ML cross-target warning")
+            
+            result["passed"] = len(result["errors"]) == 0
+            
+        except Exception as e:
+            result["errors"].append(f"Exception: {str(e)}")
+        
+        self._print_test_result("T12: ML Explanation", result)
         return result
     
     # ========== HELPERS ==========

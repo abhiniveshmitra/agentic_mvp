@@ -64,6 +64,7 @@ class PreparedProtein:
     confidence_regions: Dict = field(default_factory=dict)
     explanation: ProteinPrepExplanation = field(default_factory=ProteinPrepExplanation)
     error: Optional[str] = None
+    sequence: Optional[str] = None  # Protein sequence for ML models
     
     def to_dict(self) -> Dict:
         return {
