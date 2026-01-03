@@ -23,6 +23,8 @@ from stage2.agents.docking import DockingResult
 from stage2.agents.adme_tox_stage2 import ADMEToxStage2Result
 from stage2.agents.patent_stub import PatentRiskResult
 from stage2.agents.ml_refinement import MLRefinementResult
+from stage2.agents.decision_label import compute_decision_label, DecisionLabelResult
+from stage2.agents.llm_summary import LLMSummaryAgent, LLMSummaryInput, LLMSummaryOutput
 
 logger = get_logger(__name__)
 
@@ -30,6 +32,7 @@ logger = get_logger(__name__)
 STAGE1_VERSION = "phase1-stable"
 STAGE2_VERSION = "1.0.0"
 STAGE3_VERSION = "phase3-ml-integration"  # ML refinement layer
+STAGE4_VERSION = "phase4-llm-summary"  # LLM decision summary
 
 
 @dataclass
@@ -41,6 +44,8 @@ class AggregatedCandidate:
     compound_name: str
     stage1: Dict = field(default_factory=dict)
     stage2: Dict = field(default_factory=dict)
+    decision_label: str = ""  # Phase-4: Deterministic label (PRIORITIZED/FLAGGED/DEPRIORITIZED)
+    llm_summary: Dict = field(default_factory=dict)  # Phase-4: LLM-generated explanation
     narrative: str = ""
     provenance: Dict = field(default_factory=dict)
     
@@ -51,6 +56,8 @@ class AggregatedCandidate:
             "compound_name": self.compound_name,
             "stage1": self.stage1,
             "stage2": self.stage2,
+            "decision_label": self.decision_label,
+            "llm_summary": self.llm_summary,
             "narrative": self.narrative,
             "provenance": self.provenance,
         }
@@ -136,10 +143,73 @@ class Stage2Aggregator:
             ml_refinement_result=ml_refinement_result,
         )
         
+        # Phase-4: Compute decision label (DETERMINISTIC, before LLM)
+        adme_status = "SAFE"
+        if adme_tox_result:
+            adme_status = adme_tox_result.label.value if hasattr(adme_tox_result.label, 'value') else str(adme_tox_result.label)
+        
+        docking_status = "NOT_EVALUATED"
+        if docking_result:
+            docking_status = docking_result.docking_status
+        
+        ml_status = "NOT_APPLICABLE"
+        if ml_refinement_result:
+            ml_status = ml_refinement_result.ml_status
+        
+        label_result = compute_decision_label(
+            adme_status=adme_status,
+            docking_status=docking_status,
+            ml_status=ml_status,
+        )
+        
+        # Phase-4: Generate LLM summary (narrator only)
+        llm_agent = LLMSummaryAgent(use_llm=False)  # Template-based for determinism
+        
+        # Extract ADME rules triggered (list of rule_id strings)
+        adme_rules = []
+        pains = []
+        if adme_tox_result and adme_tox_result.explanation:
+            rules = adme_tox_result.explanation.rules_triggered or []
+            adme_rules = [r.get("rule_id", "") if isinstance(r, dict) else str(r) for r in rules]
+            if adme_tox_result.explanation.pains_details:
+                pains = [adme_tox_result.explanation.pains_details.get("pains_alert", "PAINS")]
+        # Extract docking details
+        vina_score = None
+        docking_obs = []
+        docking_fail_reason = None
+        if docking_result:
+            if docking_result.explanation and docking_result.explanation.raw_values:
+                vina_score = docking_result.explanation.raw_values.get("best_score")
+            if docking_result.explanation:
+                docking_obs = docking_result.explanation.observations or []
+            docking_fail_reason = docking_result.error
+        
+        llm_input = LLMSummaryInput(
+            stage1_rank=topk_candidate.stage1_rank,
+            stage1_percentile=topk_candidate.stage1_percentile,
+            stage1_affinity_score=topk_candidate.stage1_score,
+            stage1_confidence_tier=topk_candidate.stage1_confidence,
+            adme_status=adme_status,
+            adme_rules_triggered=adme_rules,
+            pains_alerts=pains,
+            docking_status=docking_status,
+            vina_score=vina_score,
+            docking_observations=docking_obs,
+            docking_failure_reason=docking_fail_reason,
+            ml_status=ml_status,
+            ml_affinity_score=ml_refinement_result.ml_affinity_score if ml_refinement_result else None,
+            ml_uncertainty=ml_refinement_result.ml_uncertainty if ml_refinement_result else None,
+            compound_id=topk_candidate.compound_id,
+        )
+        
+        llm_output = llm_agent.generate_summary(llm_input)
+        
         # Provenance
         provenance = {
             "stage1_version": STAGE1_VERSION,
             "stage2_version": STAGE2_VERSION,
+            "stage3_version": STAGE3_VERSION,
+            "stage4_version": STAGE4_VERSION,
             "timestamp": datetime.now().isoformat(),
             "total_candidates_analyzed": topk_candidate.total_candidates,
         }
@@ -150,6 +220,8 @@ class Stage2Aggregator:
             compound_name=topk_candidate.compound_name,
             stage1=stage1,
             stage2=stage2,
+            decision_label=llm_output.decision_label,
+            llm_summary=llm_output.summary,
             narrative=narrative,
             provenance=provenance,
         )

@@ -18,6 +18,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from stage2.pipeline import Stage2Pipeline, create_pipeline
 from stage2.agents.docking import DockingAgent, CROSS_TARGET_WARNING
 from stage2.agents.ml_refinement import MLRefinementAgent, ML_CROSS_TARGET_WARNING, ML_UNCERTAINTY_NOTE
+from stage2.agents.decision_label import compute_decision_label, DecisionLabel
+from stage2.agents.llm_summary import LLMSummaryAgent, LLMSummaryInput, FORBIDDEN_PHRASES
 from stage2.docking.pdbqt_prep import check_openbabel_available, prepare_ligand_pdbqt
 from utils.logging import get_logger
 
@@ -60,7 +62,7 @@ class Phase21StressTest:
     def run_all_tests(self) -> Dict:
         """Run all stress tests."""
         print("=" * 70)
-        print("PHASE 2.1 + PHASE 3 (ML) STRESS TEST SUITE")
+        print("PHASE 2.1 + PHASE 3 (ML) + PHASE 4 (LLM) STRESS TEST SUITE")
         print("=" * 70)
         print()
         
@@ -79,6 +81,13 @@ class Phase21StressTest:
         self.results["T10_ml_fail_boundary"] = self.test_t10_ml_fail_boundary()
         self.results["T11_ml_no_reranking"] = self.test_t11_ml_no_reranking()
         self.results["T12_ml_explanation"] = self.test_t12_ml_explanation()
+        
+        # Phase-4 LLM Decision Summary Tests
+        self.results["T13_decision_invariance"] = self.test_t13_decision_invariance()
+        self.results["T14_fail_dominance"] = self.test_t14_fail_dominance()
+        self.results["T15_llm_determinism"] = self.test_t15_llm_determinism()
+        self.results["T16_no_new_logic"] = self.test_t16_no_new_logic()
+        self.results["T17_tone_safety"] = self.test_t17_tone_safety()
         
         # Summary
         self._print_summary()
@@ -1004,6 +1013,294 @@ class Phase21StressTest:
             result["errors"].append(f"Exception: {str(e)}")
         
         self._print_test_result("T12: ML Explanation", result)
+        return result
+    
+    # ========== T13: DECISION INVARIANCE ==========
+    def test_t13_decision_invariance(self) -> Dict:
+        """
+        T13: Decision Invariance Test.
+        
+        Goal: LLM cannot change the pre-computed decision_label.
+        """
+        print("\n" + "=" * 70)
+        print("T13: DECISION INVARIANCE TEST")
+        print("=" * 70)
+        
+        result = {
+            "passed": False,
+            "errors": [],
+            "findings": [],
+        }
+        
+        try:
+            agent = LLMSummaryAgent(use_llm=False)
+            
+            # Test FLAGGED compound
+            inputs = LLMSummaryInput(
+                adme_status="FLAGGED",
+                docking_status="PASS",
+                ml_status="APPLIED",
+                compound_id="invariance_test",
+            )
+            
+            # Compute expected label
+            expected_label = "FLAGGED"
+            
+            # Generate summary
+            output = agent.generate_summary(inputs)
+            
+            # Check label matches
+            if output.decision_label == expected_label:
+                result["findings"].append(f"[OK] decision_label unchanged: {expected_label}")
+            else:
+                result["errors"].append(f"Label changed: expected {expected_label}, got {output.decision_label}")
+            
+            # Check summary contains "flagged" language
+            summary_text = str(output.summary).lower()
+            if "flagged" in summary_text:
+                result["findings"].append("[OK] Summary contains 'flagged' language")
+            else:
+                result["errors"].append("Summary missing 'flagged' language")
+            
+            # Check no "prioritize" or "recommend"
+            if "prioritize" not in summary_text and "recommend" not in summary_text:
+                result["findings"].append("[OK] No 'prioritize' or 'recommend' phrasing")
+            else:
+                result["errors"].append("Found forbidden 'prioritize' or 'recommend'")
+            
+            result["passed"] = len(result["errors"]) == 0
+            
+        except Exception as e:
+            result["errors"].append(f"Exception: {str(e)}")
+        
+        self._print_test_result("T13: Decision Invariance", result)
+        return result
+    
+    # ========== T14: FAIL DOMINANCE ==========
+    def test_t14_fail_dominance(self) -> Dict:
+        """
+        T14: FAIL Dominance Test.
+        
+        Goal: docking FAIL → DEPRIORITIZED, no ML mention.
+        """
+        print("\n" + "=" * 70)
+        print("T14: FAIL DOMINANCE TEST")
+        print("=" * 70)
+        
+        result = {
+            "passed": False,
+            "errors": [],
+            "findings": [],
+        }
+        
+        try:
+            agent = LLMSummaryAgent(use_llm=False)
+            
+            # Test FAIL docking
+            inputs = LLMSummaryInput(
+                adme_status="SAFE",
+                docking_status="FAIL",
+                ml_status="NOT_APPLICABLE",
+                docking_failure_reason="Structural incompatibility",
+                compound_id="fail_test",
+            )
+            
+            output = agent.generate_summary(inputs)
+            
+            # Check DEPRIORITIZED
+            if output.decision_label == "DEPRIORITIZED":
+                result["findings"].append("[OK] FAIL → DEPRIORITIZED")
+            else:
+                result["errors"].append(f"Expected DEPRIORITIZED, got {output.decision_label}")
+            
+            # Check no ML scores mentioned
+            summary_text = str(output.summary).lower()
+            has_ml_score = "ml_affinity" in summary_text or "ml score" in summary_text
+            if not has_ml_score:
+                result["findings"].append("[OK] No ML scores mentioned for FAIL")
+            else:
+                result["errors"].append("ML scores mentioned despite FAIL status")
+            
+            # Check ML not applied is stated
+            if "ml refinement was not applied" in summary_text:
+                result["findings"].append("[OK] States ML was not applied")
+            else:
+                result["errors"].append("Missing statement that ML was not applied")
+            
+            result["passed"] = len(result["errors"]) == 0
+            
+        except Exception as e:
+            result["errors"].append(f"Exception: {str(e)}")
+        
+        self._print_test_result("T14: FAIL Dominance", result)
+        return result
+    
+    # ========== T15: LLM DETERMINISM ==========
+    def test_t15_llm_determinism(self) -> Dict:
+        """
+        T15: LLM Determinism Test.
+        
+        Goal: Same inputs → identical summary output.
+        """
+        print("\n" + "=" * 70)
+        print("T15: LLM DETERMINISM TEST")
+        print("=" * 70)
+        
+        result = {
+            "passed": False,
+            "errors": [],
+            "findings": [],
+        }
+        
+        try:
+            agent = LLMSummaryAgent(use_llm=False)
+            
+            inputs = LLMSummaryInput(
+                adme_status="SAFE",
+                docking_status="PASS",
+                ml_status="APPLIED",
+                ml_affinity_score=7.5,
+                ml_uncertainty=0.3,
+                compound_id="determinism_test",
+            )
+            
+            # Generate twice
+            output1 = agent.generate_summary(inputs)
+            output2 = agent.generate_summary(inputs)
+            
+            # Check labels identical
+            if output1.decision_label == output2.decision_label:
+                result["findings"].append(f"[OK] Labels identical: {output1.decision_label}")
+            else:
+                result["errors"].append(f"Labels differ: {output1.decision_label} vs {output2.decision_label}")
+            
+            # Check summaries identical
+            if output1.summary == output2.summary:
+                result["findings"].append("[OK] Summaries identical")
+            else:
+                result["errors"].append("Summaries differ between runs")
+            
+            result["passed"] = len(result["errors"]) == 0
+            
+        except Exception as e:
+            result["errors"].append(f"Exception: {str(e)}")
+        
+        self._print_test_result("T15: LLM Determinism", result)
+        return result
+    
+    # ========== T16: NO NEW LOGIC ==========
+    def test_t16_no_new_logic(self) -> Dict:
+        """
+        T16: No-New-Logic Test.
+        
+        Goal: Summary still generated without ML fields, no hallucination.
+        """
+        print("\n" + "=" * 70)
+        print("T16: NO NEW LOGIC TEST")
+        print("=" * 70)
+        
+        result = {
+            "passed": False,
+            "errors": [],
+            "findings": [],
+        }
+        
+        try:
+            agent = LLMSummaryAgent(use_llm=False)
+            
+            # Input WITHOUT ML fields
+            inputs = LLMSummaryInput(
+                adme_status="SAFE",
+                docking_status="PASS",
+                ml_status="NOT_APPLICABLE",
+                ml_affinity_score=None,
+                ml_uncertainty=None,
+                compound_id="no_ml_test",
+            )
+            
+            output = agent.generate_summary(inputs)
+            
+            # Summary should still be generated
+            if output.summary:
+                result["findings"].append("[OK] Summary generated without ML")
+            else:
+                result["errors"].append("No summary generated")
+            
+            # Check no hallucinated ML confidence
+            summary_text = str(output.summary).lower()
+            hallucinated = ["ml predicts", "ml score of", "ml confidence"]
+            has_hallucination = any(h in summary_text for h in hallucinated)
+            
+            if not has_hallucination:
+                result["findings"].append("[OK] No hallucinated ML claims")
+            else:
+                result["errors"].append("Found hallucinated ML claims")
+            
+            # Should state ML was not applied
+            if "ml refinement was not applied" in summary_text:
+                result["findings"].append("[OK] Correctly states ML not applied")
+            else:
+                result["errors"].append("Missing statement that ML was not applied")
+            
+            result["passed"] = len(result["errors"]) == 0
+            
+        except Exception as e:
+            result["errors"].append(f"Exception: {str(e)}")
+        
+        self._print_test_result("T16: No New Logic", result)
+        return result
+    
+    # ========== T17: TONE SAFETY ==========
+    def test_t17_tone_safety(self) -> Dict:
+        """
+        T17: Tone Safety Test.
+        
+        Goal: No forbidden phrases in summaries.
+        """
+        print("\n" + "=" * 70)
+        print("T17: TONE SAFETY TEST")
+        print("=" * 70)
+        
+        result = {
+            "passed": False,
+            "errors": [],
+            "findings": [],
+            "forbidden_found": [],
+        }
+        
+        try:
+            agent = LLMSummaryAgent(use_llm=False)
+            
+            # Test all label types
+            test_cases = [
+                ("PRIORITIZED", LLMSummaryInput(adme_status="SAFE", docking_status="PASS", ml_status="APPLIED")),
+                ("FLAGGED", LLMSummaryInput(adme_status="FLAGGED", docking_status="PASS", ml_status="APPLIED")),
+                ("DEPRIORITIZED", LLMSummaryInput(adme_status="HIGH_RISK", docking_status="PASS", ml_status="NOT_APPLICABLE")),
+            ]
+            
+            for expected_label, inputs in test_cases:
+                output = agent.generate_summary(inputs)
+                summary_text = str(output.summary).lower()
+                
+                for phrase in FORBIDDEN_PHRASES:
+                    if phrase.lower() in summary_text:
+                        result["forbidden_found"].append(f"{expected_label}: '{phrase}'")
+            
+            if not result["forbidden_found"]:
+                result["findings"].append("[OK] No forbidden phrases in any summary")
+            else:
+                for found in result["forbidden_found"]:
+                    result["errors"].append(f"Found forbidden phrase: {found}")
+            
+            # Check specific forbidden phrases
+            result["findings"].append(f"[OK] Checked {len(FORBIDDEN_PHRASES)} forbidden phrases")
+            
+            result["passed"] = len(result["errors"]) == 0
+            
+        except Exception as e:
+            result["errors"].append(f"Exception: {str(e)}")
+        
+        self._print_test_result("T17: Tone Safety", result)
         return result
     
     # ========== HELPERS ==========
