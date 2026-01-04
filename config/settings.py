@@ -31,7 +31,39 @@ for dir_path in [DATA_DIR, MODELS_DIR, LOGS_DIR, OUTPUTS_DIR]:
 # =============================================================================
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 NCBI_EMAIL = os.getenv("NCBI_EMAIL", "")
+
+# =============================================================================
+# LLM CONFIGURATION
+# =============================================================================
+
+# LLM_PROVIDER can be "openai", "gemini", or "auto"
+# "auto" (default): Uses OpenAI if OPENAI_API_KEY is set, else falls back to Gemini
+_llm_provider_env = os.getenv("LLM_PROVIDER", "auto").lower()
+
+if _llm_provider_env == "auto":
+    # Auto-select: OpenAI preferred when available
+    if OPENAI_API_KEY:
+        LLM_PROVIDER = "openai"
+    elif GOOGLE_API_KEY:
+        LLM_PROVIDER = "gemini"
+    else:
+        LLM_PROVIDER = None  # No LLM available
+else:
+    LLM_PROVIDER = _llm_provider_env
+
+LLM_CONFIG = {
+    "openai": {
+        "model": "gpt-4o-mini",  # Cost-effective and fast
+        "temperature": 0.1,  # Low temperature for consistent extraction
+        "max_tokens": 2048,
+    },
+    "gemini": {
+        "model": "gemini-2.0-flash",
+        "temperature": 0.1,
+    },
+}
 
 # =============================================================================
 # CHEMISTRY FILTER THRESHOLDS (IMMUTABLE)
@@ -136,10 +168,11 @@ def validate_config():
     """Validate critical configuration on startup."""
     errors = []
     
-    if not GOOGLE_API_KEY:
-        errors.append("GOOGLE_API_KEY is not set in environment")
+    if not GOOGLE_API_KEY and not OPENAI_API_KEY:
+        errors.append("No LLM API key set - set OPENAI_API_KEY or GOOGLE_API_KEY in environment")
     
     if errors:
         raise ValueError(f"Configuration errors: {', '.join(errors)}")
     
     return True
+

@@ -21,7 +21,7 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from config.settings import validate_config, GOOGLE_API_KEY
+from config.settings import validate_config, LLM_PROVIDER, OPENAI_API_KEY, GOOGLE_API_KEY
 from orchestrator.pipeline import Pipeline
 from validation.controls.loaders import load_controls_for_target
 
@@ -90,10 +90,16 @@ def main():
     st.markdown('<h1 class="main-header">🧬 Drug Discovery Platform</h1>', unsafe_allow_html=True)
     st.markdown('<p class="sub-header">AI-Powered Compound Discovery & Validation</p>', unsafe_allow_html=True)
     
-    # Check API key
-    if not GOOGLE_API_KEY:
-        st.error("⚠️ GOOGLE_API_KEY not configured. Please set it in your .env file.")
+    # Check API key (either OpenAI or Gemini)
+    if not LLM_PROVIDER:
+        st.error("⚠️ No LLM API key configured. Please set OPENAI_API_KEY or GOOGLE_API_KEY in your .env file.")
         st.stop()
+    
+    # Show which LLM is active
+    if LLM_PROVIDER == "openai":
+        st.success("🤖 Using OpenAI GPT-4o-mini for AI extraction")
+    else:
+        st.info("🧠 Using Google Gemini for AI extraction")
     
     # Sidebar - Configuration
     with st.sidebar:
@@ -187,7 +193,12 @@ def main():
         )
     
     # Main content area
+    # Main content area
     if run_button:
+        # Clear previous results
+        if "pipeline_results" in st.session_state:
+            del st.session_state["pipeline_results"]
+        
         run_pipeline(
             target_protein=target_protein,
             protein_sequence=protein_sequence if protein_sequence else None,
@@ -196,6 +207,15 @@ def main():
             use_controls=use_controls,
             discovery_mode=discovery_mode,
             max_compounds=max_compounds,
+        )
+    elif "pipeline_results" in st.session_state:
+        # Display stored results
+        results = st.session_state["pipeline_results"]
+        display_database_results(
+            candidates=results["candidates"],
+            rejected=results["rejected"],
+            target=results["target"],
+            discovery_mode=results["discovery_mode"],
         )
     else:
         show_welcome_screen()
@@ -418,6 +438,14 @@ def run_pipeline(
         progress_bar.progress(100)
         status_text.markdown("**✓ Complete**")
         
+        # Save results to session state
+        st.session_state["pipeline_results"] = {
+            "candidates": candidates_only,
+            "rejected": rejected_compounds,
+            "target": target_protein,
+            "discovery_mode": discovery_mode,
+        }
+        
         # Display results
         with results_container:
             display_database_results(
@@ -621,9 +649,553 @@ def display_database_results(candidates, rejected, target, discovery_mode):
     else:
         st.warning("No compounds passed all filters.")
     
-    # Show rejected if any
+    # =========================================================================
+    # ADMET & OFF-TARGET ANALYSIS SECTION (New!)
+    # =========================================================================
+    if candidates:
+        st.divider()
+        st.subheader("🧬 ADMET & Off-Target Analysis")
+        st.caption("Advanced pharmacokinetic and safety predictions for top compounds")
+        
+        # Try to import ADMET modules
+        # Try to import ADMET and Explainer modules
+        try:
+            from validation.admet.admet_predictor import predict_admet
+            from validation.admet.off_target_predictor import analyze_off_targets, generate_off_target_summary_llm
+            from validation.admet.ddi_predictor import get_diabetes_cardiac_ddi, DDISeverity
+            from validation.explainability.compound_explainer import generate_admet_explanation, generate_ddi_explanation, generate_pk_explanation
+            has_admet = True
+        except ImportError as e:
+            has_admet = False
+            st.info(f"ADMET modules not available: {e}")
+        
+        if has_admet:
+            # Let user select a compound to analyze
+            compound_options = {
+                f"{c.get('compound_name', c.get('compound_id', 'Unknown'))}": i
+                for i, c in enumerate(candidates[:10])
+            }
+            
+            selected_compound = st.selectbox(
+                "Select compound for detailed analysis:",
+                list(compound_options.keys()),
+                key="admet_compound_selector"
+            )
+            
+            if selected_compound:
+                idx = compound_options[selected_compound]
+                compound = candidates[idx]
+                smiles = compound.get("smiles", "")
+                compound_id = compound.get("compound_id", "")
+                
+                if smiles:
+                    col_admet, col_offtarget = st.columns(2)
+                    
+                    # ADMET Analysis
+                    with col_admet:
+                        st.markdown("### 💊 ADMET Profile")
+                        
+                        with st.spinner("Calculating ADMET properties..."):
+                            admet_profile = predict_admet(smiles)
+                        
+                        # Display in tabs
+                        tab_abs, tab_dist, tab_met, tab_tox, tab_pk = st.tabs(
+                            ["Absorption", "Distribution", "Metabolism", "Toxicity", "⏱️ Pharmacokinetics"]
+                        )
+                        
+                        with tab_abs:
+                            st.metric("GI Absorption", admet_profile.gi_absorption)
+                            if admet_profile.pgp_substrate:
+                                st.warning("⚠️ P-glycoprotein substrate")
+                            st.metric("Bioavailability Score", f"{admet_profile.bioavailability_score:.0%}")
+                        
+                        with tab_dist:
+                            bbb_status = "✅ BBB+" if admet_profile.bbb_permeant else "❌ BBB-"
+                            st.metric("Blood-Brain Barrier", bbb_status)
+                            if admet_profile.log_bb:
+                                st.caption(f"log BB: {admet_profile.log_bb:.2f}")
+                        
+                        with tab_met:
+                            cyp_list = admet_profile.get_cyp_interactions()
+                            if cyp_list:
+                                st.warning("⚠️ CYP450 Interactions Detected")
+                                for cyp in cyp_list:
+                                    st.markdown(f"- {cyp}")
+                            else:
+                                st.success("✅ No significant CYP inhibition")
+                        
+                        with tab_tox:
+                            tox_alerts = admet_profile.get_toxicity_alerts()
+                            if tox_alerts:
+                                for alert in tox_alerts:
+                                    if alert["severity"] == "critical":
+                                        st.error(f"🔴 {alert['type']}: {alert['message']}")
+                                    else:
+                                        st.warning(f"🟡 {alert['type']}: {alert['message']}")
+                            else:
+                                st.success("✅ No significant toxicity alerts")
+                            
+                            # hERG status
+                            st.metric("hERG Risk", admet_profile.herg_inhibitor)
+                            
+                            # Synthetic accessibility
+                            if admet_profile.sa_score:
+                                sa_desc = "Easy" if admet_profile.sa_score < 4 else ("Moderate" if admet_profile.sa_score < 7 else "Difficult")
+                                st.metric("Synthetic Accessibility", f"{sa_desc} ({admet_profile.sa_score:.1f}/10)")
+                        
+                        with tab_pk:
+                            st.markdown("**⏱️ Pharmacokinetics Predictions**")
+                            st.caption("Estimated PK parameters based on molecular properties")
+                            
+                            # Half-life with interpretation
+                            col_hl, col_tmax = st.columns(2)
+                            with col_hl:
+                                if admet_profile.half_life_estimate:
+                                    hl_val = admet_profile.half_life_estimate
+                                    if hl_val >= 12:
+                                        hl_status = "Long (once daily)"
+                                    elif hl_val >= 6:
+                                        hl_status = "Moderate (twice daily)"
+                                    else:
+                                        hl_status = "Short (multiple daily)"
+                                    st.metric("Half-life", f"{hl_val:.1f} hrs", delta=hl_status)
+                                else:
+                                    st.metric("Half-life", "N/A")
+                            
+                            with col_tmax:
+                                if admet_profile.tmax_estimate:
+                                    tmax_val = admet_profile.tmax_estimate
+                                    if tmax_val <= 1:
+                                        tmax_status = "Rapid absorption"
+                                    elif tmax_val <= 2:
+                                        tmax_status = "Moderate absorption"
+                                    else:
+                                        tmax_status = "Slow absorption"
+                                    st.metric("Tmax (Peak)", f"{tmax_val:.1f} hrs", delta=tmax_status)
+                                else:
+                                    st.metric("Tmax (Peak)", "N/A")
+                            
+                            # AUC and Cmax
+                            col_auc, col_cmax = st.columns(2)
+                            with col_auc:
+                                auc_val = admet_profile.auc_relative or "N/A"
+                                auc_icon = "🟢" if auc_val == "High" else ("🟡" if auc_val == "Moderate" else "🔴")
+                                st.metric("Relative AUC", f"{auc_icon} {auc_val}")
+                            
+                            with col_cmax:
+                                cmax_val = admet_profile.cmax_relative or "N/A"
+                                cmax_icon = "🟢" if cmax_val == "High" else ("🟡" if cmax_val == "Moderate" else "🔴")
+                                st.metric("Relative Cmax", f"{cmax_icon} {cmax_val}")
+                            
+                            # Oral bioavailability and dosing
+                            st.divider()
+                            col_f, col_dose = st.columns(2)
+                            with col_f:
+                                if admet_profile.oral_bioavailability_estimate:
+                                    f_pct = admet_profile.oral_bioavailability_estimate * 100
+                                    if f_pct >= 70:
+                                        f_color = "normal"
+                                    elif f_pct >= 40:
+                                        f_color = "off"
+                                    else:
+                                        f_color = "inverse"
+                                    st.metric("Oral Bioavailability", f"{f_pct:.0f}%")
+                                else:
+                                    st.metric("Oral Bioavailability", "N/A")
+                            
+                            with col_dose:
+                                dosing = admet_profile.dosing_frequency or "N/A"
+                                st.metric("💊 Dosing Recommendation", dosing)
+                            
+                            # LLM Explanation for PK
+                            st.divider()
+                            with st.spinner("🤖 Generating PK interpretation..."):
+                                pk_profile = admet_profile.to_dict().get("pharmacokinetics", {})
+                                pk_explanation = generate_pk_explanation(
+                                    compound_id=compound_id,
+                                    smiles=smiles,
+                                    pk_profile=pk_profile,
+                                )
+                            st.info(pk_explanation)
+                                
+                        # LLM Explanation for ADMET
+                        st.divider()
+                        admet_summary = generate_admet_explanation(compound_id, admet_profile.to_dict())
+                        st.info(admet_summary)
+                    
+                    # Off-Target Analysis
+                    with col_offtarget:
+                        st.markdown("### 🎯 Off-Target Prediction")
+                        st.caption("Potential protein targets beyond primary target")
+                        
+                        with st.spinner("Analyzing off-targets..."):
+                            off_target_report = analyze_off_targets(
+                                compound_id=compound_id,
+                                smiles=smiles,
+                                primary_target=target,
+                            )
+                        
+                        if off_target_report.off_targets:
+                            # Show top predicted targets
+                            for i, target in enumerate(off_target_report.off_targets[:5]):
+                                prob_pct = target.probability * 100
+                                icon = "🔴" if target.safety_alert else ("🟡" if prob_pct > 50 else "")
+                                st.markdown(f"**{i+1}. {target.target_name}** - {prob_pct:.0f}% {icon}")
+                                if target.safety_alert:
+                                    st.caption(f"  ⚠️ {target.safety_alert.get('effect', '')}")
+                            
+                            # Safety alerts summary
+                            if off_target_report.safety_alerts:
+                                st.error(f"**⚠️ {len(off_target_report.safety_alerts)} Safety Alert(s)**")
+                                for alert in off_target_report.safety_alerts[:3]:
+                                    st.markdown(f"- {alert['target']}: {alert['effect']}")
+                        else:
+                            st.info("ℹ️ No significant off-targets predicted (or API unavailable)")
+                        
+                        st.caption(off_target_report.confidence_note)
+                        
+                        # LLM Explanation for Off-Target
+                        if off_target_report.off_targets:
+                            st.divider()
+                            off_target_summary = generate_off_target_summary_llm(off_target_report)
+                            st.info(off_target_summary)
+                    
+                    # Drug-Drug Interaction Analysis (New Section!)
+                    st.divider()
+                    st.markdown("### 💊 Drug-Drug Interaction Analysis")
+                    st.caption("Polypharmacy safety check with common diabetes + cardiac medications")
+                    
+                    if True: # Already checked via has_admet
+                        with st.spinner("Analyzing drug interactions..."):
+                            ddi_report = get_diabetes_cardiac_ddi(smiles, compound_id)
+                        
+                        # Show interactions in columns
+                        col_severe, col_safe = st.columns(2)
+                        
+                        with col_severe:
+                            severe = ddi_report.get_severe_interactions()
+                            moderate = ddi_report.get_moderate_interactions()
+                            
+                            if severe:
+                                st.error(f"**⚠️ {len(severe)} Major Interaction(s)**")
+                                for ddi in severe:
+                                    icon = "❌" if ddi.severity == DDISeverity.CONTRAINDICATED else "🔴"
+                                    st.markdown(f"{icon} **{ddi.drug_name}** ({ddi.drug_class})")
+                                    st.caption(f"   Effect: {ddi.clinical_effect}")
+                            
+                            if moderate:
+                                st.warning(f"**🟡 {len(moderate)} Moderate Interaction(s)**")
+                                for ddi in moderate[:3]:
+                                    st.markdown(f"- {ddi.drug_name}: {ddi.description}")
+                            
+                            if not severe and not moderate:
+                                st.success("✅ No significant CYP-mediated interactions detected")
+                        
+                        with col_safe:
+                            if ddi_report.safe_combinations:
+                                st.success("**✅ Safe Combinations:**")
+                                safe_text = ", ".join(ddi_report.safe_combinations[:8])
+                                st.markdown(safe_text)
+                        
+                        # LLM Explanation for DDI
+                        st.divider()
+                        ddi_summary = generate_ddi_explanation(compound_id, ddi_report.to_dict())  # to_dict? check validity
+                        st.info(ddi_summary)
+                            
+                        
+                        # CYP Profile
+                        if ddi_report.compound_cyp_profile:
+                            st.markdown("**Compound CYP Profile:**")
+                            for cyp, is_inhibitor in ddi_report.compound_cyp_profile.items():
+                                if is_inhibitor:
+                                    st.markdown(f"- ⚠️ {cyp.replace('_', ' ').title()}")
+                    # Removed dead else block
+                else:
+                    st.warning("No SMILES available for this compound")
+    
+    # =========================================================================
+    # XAI EXPLANATION SECTION - Clickable compound details
+    # =========================================================================
+    st.divider()
+    st.subheader("🔬 Explainable AI: Why Accepted/Rejected?")
+    st.caption("Click on compounds below to see detailed explanations with molecular visualizations")
+    
+    # Import XAI modules
+    try:
+        from validation.explainability.explanation_engine import ExplanationEngine
+        from validation.explainability.molecule_visualizer import (
+            draw_molecule_with_heatmap, 
+            draw_molecule_simple,
+            draw_molecule_with_highlights,
+        )
+        from validation.explainability.structure_verification import (
+            verify_and_correct_compound,
+            verify_chembl_structure,
+        )
+        from validation.explainability.llm_verification import (
+            verify_structure_with_llm,
+        )
+        from validation.explainability.compound_explainer import (
+            generate_acceptance_explanation,
+            generate_rejection_explanation,
+        )
+        has_xai = True
+        has_verification = True
+        has_llm_verification = True
+        has_llm_explainer = True
+        explainer = ExplanationEngine()
+    except ImportError as e:
+        has_xai = False
+        has_verification = False
+        has_llm_verification = False
+        has_llm_explainer = False
+        st.warning(f"XAI modules not available: {e}")
+    
+    if has_xai:
+        col_accepted, col_rejected = st.columns(2)
+        
+        # =====================================================================
+        # ACCEPTED COMPOUNDS EXPLANATIONS (Top 2)
+        # =====================================================================
+        with col_accepted:
+            st.markdown("### ✅ Top Accepted Compounds")
+            
+            for i, compound in enumerate(candidates[:2]):
+                compound_name = compound.get("compound_name", compound.get("compound_id", f"Compound {i+1}"))
+                compound_id = compound.get("compound_id", "")
+                smiles = compound.get("smiles", "")
+                
+                with st.expander(f"🔬 #{i+1}: {compound_name}", expanded=(i == 0)):
+                    # VERIFY STRUCTURE BEFORE DISPLAY
+                    # Step 1: ChEMBL API verification
+                    if has_verification and compound_id.upper().startswith("CHEMBL"):
+                        with st.spinner("Verifying structure via ChEMBL..."):
+                            compound = verify_and_correct_compound(compound.copy())
+                            smiles = compound.get("smiles", "")
+                            
+                            if compound.get("smiles_corrected"):
+                                st.warning(
+                                    f"⚠️ Structure corrected from ChEMBL database. "
+                                    f"Original SMILES was incorrect."
+                                )
+                            elif not compound.get("structure_verified", True):
+                                st.error(
+                                    f"❌ Structure verification failed: "
+                                    f"{compound.get('verification_message', 'Unknown error')}"
+                                )
+                    
+                    # Step 2: LLM verification (if name differs from ID)
+                    if has_llm_verification and compound_name.upper() != compound_id.upper():
+                        with st.spinner("🤖 AI verifying compound identity..."):
+                            is_valid, message, details = verify_structure_with_llm(
+                                compound_name=compound_name,
+                                compound_id=compound_id,
+                                smiles=smiles,
+                            )
+                            
+                            if not is_valid:
+                                st.error(
+                                    f"🤖 **AI Verification Failed:**\n{message}\n\n"
+                                    f"Expected: {details.get('expected_structure', 'N/A')}\n"
+                                    f"Observed: {details.get('observed_structure', 'N/A')}"
+                                )
+                                if details.get("correct_name"):
+                                    st.info(f"💡 This structure appears to be: **{details.get('correct_name')}**")
+                            else:
+                                st.success(f"✅ {message}")
+                    
+                    # Generate explanation
+                    explanation = explainer.explain_accepted(compound)
+                    
+                    # Two column layout
+                    img_col, info_col = st.columns([1, 1])
+                    
+                    with img_col:
+                        # Draw molecule with heatmap
+                        if smiles:
+                            mol_img = draw_molecule_with_heatmap(
+                                smiles,
+                                atom_scores=explanation.atom_contributions,
+                                highlight_atoms=explanation.highlight_atoms,
+                                size=(350, 280)
+                            )
+                            if mol_img:
+                                st.image(
+                                    f"data:image/png;base64,{mol_img}",
+                                    caption="Atom Contribution Heatmap"
+                                )
+                            else:
+                                st.code(smiles, language=None)
+                        
+                        st.markdown("""
+                        <p style='font-size: 11px; color: #666;'>
+                        🔴 <b>Red/Orange</b>: High binding contribution<br>
+                        🔵 <b>Blue/Green</b>: Low contribution
+                        </p>
+                        """, unsafe_allow_html=True)
+                    
+                    with info_col:
+                        # Predicted bioactivity
+                        st.markdown("**Predicted Bioactivity**")
+                        score = compound.get("raw_score", 0)
+                        st.metric(
+                            label="Binding Score",
+                            value=f"{abs(score):.2f}",
+                            delta=f"Top {100 - compound.get('percentile', 50):.0f}%"
+                        )
+                        
+                        # Confidence
+                        confidence = explanation.confidence
+                        st.metric(
+                            label="Confidence",
+                            value=f"{confidence:.0%}"
+                        )
+                        
+                        # Key features
+                        st.markdown("**Why Accepted:**")
+                        for feature in explanation.key_binding_features[:3]:
+                            st.markdown(f"- ✅ {feature}")
+                        
+                        # Chemistry checks
+                        if explanation.chemistry_checks:
+                            st.markdown("**Passed Checks:**")
+                            for check in explanation.chemistry_checks[:3]:
+                                st.markdown(f"- {check['name']}: {check['value']}")
+                    
+                    # Pharmacophore features
+                    if explanation.pharmacophore_matches:
+                        st.markdown("**Pharmacophore Features:**")
+                        pharm_cols = st.columns(len(explanation.pharmacophore_matches[:3]))
+                        for j, match in enumerate(explanation.pharmacophore_matches[:3]):
+                            with pharm_cols[j]:
+                                st.metric(match["feature"], match["count"])
+                    
+                    # LLM-generated detailed explanation
+                    if has_llm_explainer:
+                        st.divider()
+                        with st.spinner("🤖 Generating AI analysis..."):
+                            llm_explanation = generate_acceptance_explanation(
+                                compound_id=compound_id,
+                                smiles=smiles,
+                                binding_score=compound.get("raw_score", 0),
+                                percentile=compound.get("percentile", 50),
+                                confidence=explanation.confidence,
+                            )
+                            st.markdown(llm_explanation)
+        
+        # =====================================================================
+        # REJECTED COMPOUNDS EXPLANATIONS (Top 2)
+        # =====================================================================
+        with col_rejected:
+            st.markdown("### 🚫 Top Rejected Compounds")
+            
+            for i, compound in enumerate(rejected[:2]):
+                compound_name = compound.get("compound_name", compound.get("compound_id", f"Rejected {i+1}"))
+                compound_id = compound.get("compound_id", "")
+                smiles = compound.get("smiles", "")
+                
+                with st.expander(f"❌ #{i+1}: {compound_name}", expanded=(i == 0)):
+                    # VERIFY STRUCTURE BEFORE DISPLAY
+                    if has_verification and compound_id.upper().startswith("CHEMBL"):
+                        with st.spinner("Verifying structure..."):
+                            compound = verify_and_correct_compound(compound.copy())
+                            smiles = compound.get("smiles", "")
+                            
+                            if compound.get("smiles_corrected"):
+                                st.info("ℹ️ Structure corrected from ChEMBL database.")
+                    
+                    # Step 2: LLM verification (if name differs from ID)
+                    if has_llm_verification and compound_name.upper() != compound_id.upper():
+                        with st.spinner("🤖 AI verifying compound identity..."):
+                            is_valid, message, details = verify_structure_with_llm(
+                                compound_name=compound_name,
+                                compound_id=compound_id,
+                                smiles=smiles,
+                            )
+                            
+                            if not is_valid:
+                                st.error(f"🤖 **AI Verification Failed:** {message}")
+                                if details.get("correct_name"):
+                                    st.info(f"💡 Structure appears to be: **{details.get('correct_name')}**")
+                    
+                    # Generate rejection explanation
+                    explanation = explainer.explain_rejected(compound)
+                    
+                    # Two column layout
+                    img_col, info_col = st.columns([1, 1])
+                    
+                    with img_col:
+                        # Draw molecule with problematic atoms highlighted
+                        if smiles:
+                            mol_img = draw_molecule_with_highlights(
+                                smiles,
+                                highlight_atoms=explanation.problematic_atoms,
+                                highlight_color=(1.0, 0.2, 0.2),  # Red
+                                size=(350, 280)
+                            )
+                            if mol_img:
+                                st.image(
+                                    f"data:image/png;base64,{mol_img}",
+                                    caption="Problematic Features Highlighted"
+                                )
+                            else:
+                                # Fallback to simple image
+                                simple_img = draw_molecule_simple(smiles, size=(350, 280))
+                                if simple_img:
+                                    st.image(f"data:image/png;base64,{simple_img}")
+                                else:
+                                    st.code(smiles, language=None)
+                        
+                        st.markdown("""
+                        <p style='font-size: 11px; color: #666;'>
+                        🔴 <b>Red atoms</b>: Problematic structural features
+                        </p>
+                        """, unsafe_allow_html=True)
+                    
+                    with info_col:
+                        # Rejection reason (prominent)
+                        st.error(f"**Rejection Reason:**\n{explanation.rejection_reason}")
+                        
+                        # Category
+                        st.markdown(f"**Category:** `{explanation.rejection_category}`")
+                        
+                        # Failed filters
+                        if explanation.failed_filters:
+                            st.markdown("**Failed Checks:**")
+                            for filt in explanation.failed_filters:
+                                severity_icon = "🔴" if filt.get("severity") == "critical" else "🟡"
+                                st.markdown(
+                                    f"- {severity_icon} **{filt['filter']}**: {filt['actual']} "
+                                    f"(limit: {filt['limit']})"
+                                )
+                        
+                        # Problematic features
+                        if explanation.problematic_features:
+                            st.markdown("**Problematic Features:**")
+                            for feat in explanation.problematic_features:
+                                st.markdown(f"- 🔴 {feat}")
+                    
+                    # Remediation hints
+                    if explanation.remediation_hints:
+                        st.info("**💡 Suggested Improvements:**\n" + 
+                               "\n".join([f"• {h}" for h in explanation.remediation_hints[:3]]))
+                    
+                    # LLM-generated detailed explanation
+                    if has_llm_explainer:
+                        st.divider()
+                        with st.spinner("🤖 Generating AI analysis..."):
+                            llm_explanation = generate_rejection_explanation(
+                                compound_id=compound_id,
+                                smiles=smiles,
+                                rejection_reason=compound.get("rejection_reason", "Unknown"),
+                            )
+                            st.markdown(llm_explanation)
+    
+    # =========================================================================
+    # REJECTED COMPOUNDS TABLE (Full list)
+    # =========================================================================
     if rejected:
-        with st.expander(f"🚫 View {len(rejected)} Rejected Compounds"):
+        with st.expander(f"📋 View All {len(rejected)} Rejected Compounds"):
             # Categorize rejections
             pains_count = sum(1 for c in rejected if "PAINS" in c.get("rejection_reason", ""))
             mw_count = sum(1 for c in rejected if "MW" in c.get("rejection_reason", ""))

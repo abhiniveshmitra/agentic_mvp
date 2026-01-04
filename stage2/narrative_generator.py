@@ -20,15 +20,12 @@ from utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-# Check for Google API Key
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-
 
 class NarrativeSummaryGenerator:
     """
     Generates human-readable narrative summaries for Stage-2 candidates.
     
-    Uses Gemini API for natural language generation, but ONLY for summarization.
+    Uses OpenAI or Gemini API for natural language generation, but ONLY for summarization.
     Falls back to rule-based summaries if API unavailable.
     """
     
@@ -39,21 +36,31 @@ class NarrativeSummaryGenerator:
         Args:
             use_llm: Whether to use LLM for generation (requires API key)
         """
-        self.use_llm = use_llm and bool(GOOGLE_API_KEY)
+        from config.settings import LLM_PROVIDER, LLM_CONFIG, OPENAI_API_KEY, GOOGLE_API_KEY
+        
+        self.llm_provider = LLM_PROVIDER if use_llm else None
+        self.use_llm = use_llm and bool(LLM_PROVIDER)
+        self.model = None
+        self.client = None
         
         if self.use_llm:
             try:
-                import google.generativeai as genai
-                genai.configure(api_key=GOOGLE_API_KEY)
-                self.model = genai.GenerativeModel('gemini-2.0-flash')
-                logger.info("NarrativeSummaryGenerator initialized with Gemini")
+                if self.llm_provider == "openai":
+                    from openai import OpenAI
+                    self.client = OpenAI(api_key=OPENAI_API_KEY)
+                    self.llm_config = LLM_CONFIG["openai"]
+                    logger.info(f"NarrativeSummaryGenerator initialized with OpenAI {self.llm_config['model']}")
+                else:  # gemini
+                    import google.generativeai as genai
+                    genai.configure(api_key=GOOGLE_API_KEY)
+                    self.model = genai.GenerativeModel(LLM_CONFIG["gemini"]["model"])
+                    self.llm_config = LLM_CONFIG["gemini"]
+                    logger.info(f"NarrativeSummaryGenerator initialized with Gemini {self.llm_config['model']}")
             except Exception as e:
-                logger.warning(f"Gemini init failed: {e}, using rule-based fallback")
+                logger.warning(f"LLM init failed: {e}, using rule-based fallback")
                 self.use_llm = False
-                self.model = None
         else:
             logger.info("NarrativeSummaryGenerator initialized (rule-based mode)")
-            self.model = None
     
     def generate_narrative(self, candidate: Dict) -> str:
         """
@@ -87,7 +94,7 @@ class NarrativeSummaryGenerator:
         return narratives
     
     def _generate_with_llm(self, candidate: Dict) -> str:
-        """Generate narrative using Gemini API."""
+        """Generate narrative using OpenAI or Gemini API."""
         try:
             # Build context from explanation schema
             context = self._build_context(candidate)
@@ -107,10 +114,20 @@ Here is the data:
 
 Generate a clear, scientific, but accessible summary:"""
             
-            response = self.model.generate_content(prompt)
+            if self.llm_provider == "openai":
+                response = self.client.chat.completions.create(
+                    model=self.llm_config["model"],
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=self.llm_config["temperature"],
+                    max_tokens=self.llm_config["max_tokens"],
+                )
+                text = response.choices[0].message.content
+            else:  # gemini
+                response = self.model.generate_content(prompt)
+                text = response.text
             
-            if response.text:
-                return response.text.strip()
+            if text:
+                return text.strip()
             else:
                 return self._generate_rule_based(candidate)
                 
