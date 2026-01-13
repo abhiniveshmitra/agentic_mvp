@@ -914,6 +914,289 @@ def display_database_results(candidates, rejected, target, discovery_mode):
                     st.warning("No SMILES available for this compound")
     
     # =========================================================================
+    # GENERATIVE CHEMISTRY SECTION - Molecular Analog Generation
+    # =========================================================================
+    if candidates:
+        st.divider()
+        st.subheader("🧬 Generative Chemistry: Scaffold Hopping")
+        st.caption("Generate novel molecular analogs from top compounds")
+        
+        try:
+            from discovery.generative.scaffold_hopper import ScaffoldHopper, generate_analogs_for_compound
+            from validation.explainability.mol3d_viewer import get_streamlit_3d_viewer
+            import streamlit.components.v1 as components
+            has_generative = True
+        except ImportError as e:
+            has_generative = False
+            st.info(f"Generative chemistry module not available: {e}")
+        
+        if has_generative:
+            # Let user select a compound for analog generation
+            gen_compound_options = {
+                f"{c.get('compound_name', c.get('compound_id', 'Unknown'))} (Rank #{i+1})": i
+                for i, c in enumerate(candidates[:10])
+            }
+            
+            col_select, col_settings = st.columns([2, 1])
+            
+            with col_select:
+                selected_for_gen = st.selectbox(
+                    "Select compound for analog generation:",
+                    list(gen_compound_options.keys()),
+                    key="gen_compound_selector"
+                )
+            
+            with col_settings:
+                n_analogs = st.slider("Number of analogs", 5, 20, 10, key="n_analogs_slider")
+            
+            if selected_for_gen:
+                gen_idx = gen_compound_options[selected_for_gen]
+                gen_compound = candidates[gen_idx]
+                gen_smiles = gen_compound.get("smiles", "")
+                
+                if gen_smiles:
+                    generate_btn = st.button("🧪 Generate Analogs", type="primary", key="generate_analogs_btn")
+                    
+                    if generate_btn:
+                        with st.spinner(f"Generating {n_analogs} molecular analogs..."):
+                            hopper = ScaffoldHopper(similarity_threshold=0.3)
+                            
+                            # Show scaffold
+                            scaffold = hopper.extract_scaffold(gen_smiles)
+                            if scaffold:
+                                st.info(f"**Murcko Scaffold:** `{scaffold}`")
+                            
+                            # Generate analogs
+                            analogs = hopper.generate_analogs(gen_smiles, n_analogs=n_analogs)
+                        
+                        if analogs:
+                            st.success(f"✅ Generated {len(analogs)} novel analogs!")
+                            
+                            # Display analogs in columns
+                            for i, analog in enumerate(analogs):
+                                with st.expander(f"Analog #{i+1}: {analog.modification_type}", expanded=(i < 2)):
+                                    col_mol, col_info = st.columns([1, 1])
+                                    
+                                    with col_mol:
+                                        # Show 3D structure
+                                        try:
+                                            viewer_html = get_streamlit_3d_viewer(
+                                                smiles=analog.smiles,
+                                                title=f"Analog #{i+1}",
+                                                width=300,
+                                                height=250,
+                                            )
+                                            components.html(viewer_html, height=300, scrolling=False)
+                                        except Exception:
+                                            st.code(analog.smiles, language=None)
+                                    
+                                    with col_info:
+                                        st.markdown(f"**SMILES:**")
+                                        st.code(analog.smiles[:60] + "..." if len(analog.smiles) > 60 else analog.smiles)
+                                        
+                                        st.metric("Similarity to Parent", f"{analog.similarity_to_parent:.2%}")
+                                        st.markdown(f"**Method:** {analog.modification_type}")
+                                        
+                                        # Copy button
+                                        st.text_input(
+                                            "Full SMILES (copy):",
+                                            value=analog.smiles,
+                                            key=f"copy_smiles_{i}",
+                                            label_visibility="collapsed"
+                                        )
+                            
+                            # Download all analogs as CSV
+                            analog_data = [a.to_dict() for a in analogs]
+                            analog_df = pd.DataFrame(analog_data)
+                            csv = analog_df.to_csv(index=False)
+                            
+                            st.download_button(
+                                label="📥 Download All Analogs (CSV)",
+                                data=csv,
+                                file_name=f"analogs_{gen_compound.get('compound_id', 'compound')}.csv",
+                                mime="text/csv",
+                            )
+                        else:
+                            st.warning("No valid analogs could be generated. Try a different compound.")
+                else:
+                    st.warning("No SMILES available for analog generation")
+    
+    # =========================================================================
+    # RETROSYNTHESIS SECTION - Synthesis Route Planning
+    # =========================================================================
+    if candidates:
+        st.divider()
+        st.subheader("🧪 Retrosynthesis: Synthesis Route Planning")
+        st.caption("Analyze synthetic accessibility and plan synthesis routes")
+        
+        try:
+            from discovery.generative.retrosynthesis import RetrosynthesisPlanner
+            has_retrosynthesis = True
+        except ImportError as e:
+            has_retrosynthesis = False
+            st.info(f"Retrosynthesis module not available: {e}")
+        
+        if has_retrosynthesis:
+            # Compound selector for retrosynthesis
+            retro_compound_options = {
+                f"{c.get('compound_name', c.get('compound_id', 'Unknown'))} (Rank #{i+1})": i
+                for i, c in enumerate(candidates[:10])
+            }
+            
+            selected_for_retro = st.selectbox(
+                "Select compound for synthesis analysis:",
+                list(retro_compound_options.keys()),
+                key="retro_compound_selector"
+            )
+            
+            if selected_for_retro:
+                retro_idx = retro_compound_options[selected_for_retro]
+                retro_compound = candidates[retro_idx]
+                retro_smiles = retro_compound.get("smiles", "")
+                
+                if retro_smiles:
+                    analyze_btn = st.button("🔬 Analyze Synthesis Route", type="primary", key="analyze_retro_btn")
+                    
+                    if analyze_btn:
+                        with st.spinner("Analyzing synthesis route..."):
+                            planner = RetrosynthesisPlanner()
+                            route = planner.analyze(retro_smiles)
+                            # Store in session state for validation button
+                            st.session_state["current_retro_route"] = route
+                            st.session_state["current_retro_smiles"] = retro_smiles
+                    
+                    # Get route from session state if available
+                    route = st.session_state.get("current_retro_route")
+                    retro_smiles_saved = st.session_state.get("current_retro_smiles", retro_smiles)
+                    
+                    if route:
+                        # Display results in columns
+                        col_score, col_feasibility, col_steps = st.columns(3)
+                        
+                        with col_score:
+                            # SA Score with color coding
+                            sa_color = "green" if route.synthetic_accessibility <= 4 else "orange" if route.synthetic_accessibility <= 6 else "red"
+                            st.metric(
+                                "Synthetic Accessibility",
+                                f"{route.synthetic_accessibility:.1f}/10",
+                                help="1=Easy, 10=Difficult"
+                            )
+                        
+                        with col_feasibility:
+                            feasibility_emoji = {"high": "✅", "moderate": "⚠️", "low": "🔶", "challenging": "⛔"}
+                            st.metric(
+                                "Feasibility",
+                                f"{feasibility_emoji.get(route.estimated_feasibility, '')} {route.estimated_feasibility.title()}"
+                            )
+                        
+                        with col_steps:
+                            st.metric("Estimated Steps", route.total_steps)
+                        
+                        # Building blocks
+                        st.markdown("### 🧱 Building Blocks")
+                        if route.building_blocks:
+                            bb_cols = st.columns(min(len(route.building_blocks), 4))
+                            for i, bb in enumerate(route.building_blocks[:4]):
+                                with bb_cols[i % 4]:
+                                    avail_emoji = {"purchasable": "🟢", "likely": "🟡", "custom": "🔴"}
+                                    st.markdown(f"**Block {i+1}** {avail_emoji.get(bb.availability, '')}")
+                                    st.code(bb.smiles[:30] + "..." if len(bb.smiles) > 30 else bb.smiles)
+                                    st.caption(bb.availability)
+                        
+                        # Reaction steps
+                        if route.steps:
+                            st.markdown("### ⚗️ Proposed Reaction Steps")
+                            for i, step in enumerate(route.steps, 1):
+                                with st.expander(f"Step {i}: {step.reaction_type}"):
+                                    st.markdown(f"**Reactants:** `{step.reactants[0][:40]}...` + `{step.reactants[1][:40]}...`")
+                                    st.markdown(f"**Conditions:** {step.conditions}")
+                                    st.markdown(f"**Yield:** {step.yield_estimate}")
+                        
+                        # Notes
+                        if route.notes:
+                            st.markdown("### 📝 Synthesis Notes")
+                            for note in route.notes:
+                                st.markdown(note)
+                        
+                        # Validation section
+                        st.markdown("### ✅ Route Validation")
+                        
+                        # Add validation toggle
+                        use_llm_validation = st.checkbox(
+                            "Use AI Expert Review (slower but more thorough)",
+                            value=False,
+                            key="use_llm_validation"
+                        )
+                        
+                        if st.button("🔍 Validate Route", key="validate_route_btn"):
+                            with st.spinner("Validating synthesis route..."):
+                                try:
+                                    from discovery.generative.synthesis_validator import (
+                                        validate_synthesis_route,
+                                        ReactionValidator
+                                    )
+                                    
+                                    # Prepare data for validation
+                                    bb_smiles = [bb.smiles for bb in route.building_blocks]
+                                    steps_data = [
+                                        {
+                                            "reactants": step.reactants,
+                                            "reaction_type": step.reaction_type,
+                                            "conditions": step.conditions,
+                                        }
+                                        for step in route.steps
+                                    ]
+                                    
+                                    # Run validation
+                                    validation = validate_synthesis_route(
+                                        retro_smiles_saved,
+                                        bb_smiles,
+                                        steps_data,
+                                        use_llm=use_llm_validation,
+                                    )
+                                    
+                                    # Display results
+                                    col_v1, col_v2 = st.columns(2)
+                                    
+                                    with col_v1:
+                                        if validation.is_valid:
+                                            st.success(f"✅ Route Validated (Confidence: {validation.confidence:.0%})")
+                                        else:
+                                            st.error(f"⚠️ Issues Detected (Confidence: {validation.confidence:.0%})")
+                                    
+                                    with col_v2:
+                                        conf_emoji = "🟢" if validation.confidence > 0.7 else "🟡" if validation.confidence > 0.4 else "🔴"
+                                        st.markdown(f"**Validation Confidence:** {conf_emoji} {validation.confidence:.0%}")
+                                    
+                                    # Issues
+                                    if validation.issues:
+                                        st.error("**Issues Found:**")
+                                        for issue in validation.issues:
+                                            st.markdown(f"- ❌ {issue}")
+                                    
+                                    # Warnings
+                                    if validation.warnings:
+                                        st.warning("**Warnings:**")
+                                        for warning in validation.warnings:
+                                            st.markdown(f"- ⚠️ {warning}")
+                                    
+                                    # Suggestions
+                                    if validation.suggestions:
+                                        st.info("**Suggestions:**")
+                                        for suggestion in validation.suggestions:
+                                            st.markdown(f"- 💡 {suggestion}")
+                                    
+                                    if not validation.issues and not validation.warnings:
+                                        st.success("✅ No issues detected - route appears chemically feasible")
+                                        
+                                except Exception as e:
+                                    st.warning(f"Validation error: {e}")
+                    else:
+                        st.info("Click 'Analyze Synthesis Route' to see synthesis plan")
+                else:
+                    st.warning("No SMILES available for synthesis analysis")
+    
+    # =========================================================================
     # XAI EXPLANATION SECTION - Clickable compound details
     # =========================================================================
     st.divider()
@@ -928,6 +1211,13 @@ def display_database_results(candidates, rejected, target, discovery_mode):
             draw_molecule_simple,
             draw_molecule_with_highlights,
         )
+        from validation.explainability.mol3d_viewer import (
+            smiles_to_3d_html,
+            get_streamlit_3d_viewer,
+            render_pharmacophore_features,
+        )
+        import streamlit.components.v1 as components
+        has_3d_viewer = True
         from validation.explainability.structure_verification import (
             verify_and_correct_compound,
             verify_chembl_structure,
@@ -949,6 +1239,7 @@ def display_database_results(candidates, rejected, target, discovery_mode):
         has_verification = False
         has_llm_verification = False
         has_llm_explainer = False
+        has_3d_viewer = False
         st.warning(f"XAI modules not available: {e}")
     
     if has_xai:
@@ -1011,28 +1302,73 @@ def display_database_results(candidates, rejected, target, discovery_mode):
                     img_col, info_col = st.columns([1, 1])
                     
                     with img_col:
-                        # Draw molecule with heatmap
-                        if smiles:
-                            mol_img = draw_molecule_with_heatmap(
-                                smiles,
-                                atom_scores=explanation.atom_contributions,
-                                highlight_atoms=explanation.highlight_atoms,
-                                size=(350, 280)
-                            )
-                            if mol_img:
-                                st.image(
-                                    f"data:image/png;base64,{mol_img}",
-                                    caption="Atom Contribution Heatmap"
-                                )
-                            else:
-                                st.code(smiles, language=None)
+                        # Tabbed view for 2D and 3D molecules
+                        mol_tab_2d, mol_tab_3d = st.tabs(["🎨 2D Heatmap", "🧬 3D Structure"])
                         
-                        st.markdown("""
-                        <p style='font-size: 11px; color: #666;'>
-                        🔴 <b>Red/Orange</b>: High binding contribution<br>
-                        🔵 <b>Blue/Green</b>: Low contribution
-                        </p>
-                        """, unsafe_allow_html=True)
+                        with mol_tab_2d:
+                            # Draw molecule with heatmap
+                            if smiles:
+                                mol_img = draw_molecule_with_heatmap(
+                                    smiles,
+                                    atom_scores=explanation.atom_contributions,
+                                    highlight_atoms=explanation.highlight_atoms,
+                                    size=(350, 280)
+                                )
+                                if mol_img:
+                                    st.image(
+                                        f"data:image/png;base64,{mol_img}",
+                                        caption="Atom Contribution Heatmap"
+                                    )
+                                else:
+                                    st.code(smiles, language=None)
+                            
+                            st.markdown("""
+                            <p style='font-size: 11px; color: #666;'>
+                            🔴 <b>Red/Orange</b>: High binding contribution<br>
+                            🔵 <b>Blue/Green</b>: Low contribution
+                            </p>
+                            """, unsafe_allow_html=True)
+                        
+                        with mol_tab_3d:
+                            # Interactive 3D viewer
+                            if smiles and has_3d_viewer:
+                                try:
+                                    viewer_html = get_streamlit_3d_viewer(
+                                        smiles=smiles,
+                                        title=compound_name[:30],
+                                        score=compound.get("raw_score"),
+                                        width=350,
+                                        height=320,
+                                    )
+                                    components.html(viewer_html, height=380, scrolling=False)
+                                    
+                                    # Full screen button
+                                    if st.button(f"🔍 Expand Full Screen", key=f"expand_3d_accepted_{i}"):
+                                        st.session_state[f"show_fullscreen_3d_{compound_id}"] = True
+                                    
+                                    # Show fullscreen modal if triggered
+                                    if st.session_state.get(f"show_fullscreen_3d_{compound_id}", False):
+                                        @st.dialog(f"🧬 3D Structure: {compound_name[:40]}", width="large")
+                                        def show_fullscreen_mol():
+                                            large_viewer = get_streamlit_3d_viewer(
+                                                smiles=smiles,
+                                                title=compound_name,
+                                                score=compound.get("raw_score"),
+                                                width=750,
+                                                height=550,
+                                            )
+                                            components.html(large_viewer, height=620, scrolling=False)
+                                            st.caption("🖱️ Click and drag to rotate | Scroll to zoom | Press Esc to close")
+                                            if st.button("Close", key=f"close_modal_{compound_id}"):
+                                                st.session_state[f"show_fullscreen_3d_{compound_id}"] = False
+                                                st.rerun()
+                                        show_fullscreen_mol()
+                                        st.session_state[f"show_fullscreen_3d_{compound_id}"] = False
+                                except Exception as e:
+                                    st.warning(f"3D viewer unavailable: {e}")
+                                    st.code(smiles, language=None)
+                            else:
+                                st.info("Install py3Dmol for 3D visualization: `pip install py3Dmol`")
                     
                     with info_col:
                         # Predicted bioactivity
@@ -1125,32 +1461,75 @@ def display_database_results(candidates, rejected, target, discovery_mode):
                     img_col, info_col = st.columns([1, 1])
                     
                     with img_col:
-                        # Draw molecule with problematic atoms highlighted
-                        if smiles:
-                            mol_img = draw_molecule_with_highlights(
-                                smiles,
-                                highlight_atoms=explanation.problematic_atoms,
-                                highlight_color=(1.0, 0.2, 0.2),  # Red
-                                size=(350, 280)
-                            )
-                            if mol_img:
-                                st.image(
-                                    f"data:image/png;base64,{mol_img}",
-                                    caption="Problematic Features Highlighted"
-                                )
-                            else:
-                                # Fallback to simple image
-                                simple_img = draw_molecule_simple(smiles, size=(350, 280))
-                                if simple_img:
-                                    st.image(f"data:image/png;base64,{simple_img}")
-                                else:
-                                    st.code(smiles, language=None)
+                        # Tabbed view for 2D and 3D molecules (matching accepted section)
+                        rej_tab_2d, rej_tab_3d = st.tabs(["🎨 2D Highlights", "🧬 3D Structure"])
                         
-                        st.markdown("""
-                        <p style='font-size: 11px; color: #666;'>
-                        🔴 <b>Red atoms</b>: Problematic structural features
-                        </p>
-                        """, unsafe_allow_html=True)
+                        with rej_tab_2d:
+                            # Draw molecule with problematic atoms highlighted
+                            if smiles:
+                                mol_img = draw_molecule_with_highlights(
+                                    smiles,
+                                    highlight_atoms=explanation.problematic_atoms,
+                                    highlight_color=(1.0, 0.2, 0.2),  # Red
+                                    size=(350, 280)
+                                )
+                                if mol_img:
+                                    st.image(
+                                        f"data:image/png;base64,{mol_img}",
+                                        caption="Problematic Features Highlighted"
+                                    )
+                                else:
+                                    # Fallback to simple image
+                                    simple_img = draw_molecule_simple(smiles, size=(350, 280))
+                                    if simple_img:
+                                        st.image(f"data:image/png;base64,{simple_img}")
+                                    else:
+                                        st.code(smiles, language=None)
+                            
+                            st.markdown("""
+                            <p style='font-size: 11px; color: #666;'>
+                            🔴 <b>Red atoms</b>: Problematic structural features
+                            </p>
+                            """, unsafe_allow_html=True)
+                        
+                        with rej_tab_3d:
+                            # Interactive 3D viewer for rejected compounds
+                            if smiles and has_3d_viewer:
+                                try:
+                                    viewer_html = get_streamlit_3d_viewer(
+                                        smiles=smiles,
+                                        title=f"❌ {compound_name[:25]}",
+                                        width=350,
+                                        height=320,
+                                    )
+                                    components.html(viewer_html, height=380, scrolling=False)
+                                    
+                                    # Full screen button
+                                    if st.button(f"🔍 Expand Full Screen", key=f"expand_3d_rejected_{i}"):
+                                        st.session_state[f"show_fullscreen_3d_rej_{compound_id}"] = True
+                                    
+                                    # Show fullscreen modal if triggered
+                                    if st.session_state.get(f"show_fullscreen_3d_rej_{compound_id}", False):
+                                        @st.dialog(f"🧬 3D Structure: {compound_name[:40]}", width="large")
+                                        def show_fullscreen_mol_rej():
+                                            large_viewer = get_streamlit_3d_viewer(
+                                                smiles=smiles,
+                                                title=f"❌ {compound_name}",
+                                                width=750,
+                                                height=550,
+                                            )
+                                            components.html(large_viewer, height=620, scrolling=False)
+                                            st.caption("🖱️ Click and drag to rotate | Scroll to zoom | Press Esc to close")
+                                            if st.button("Close", key=f"close_modal_rej_{compound_id}"):
+                                                st.session_state[f"show_fullscreen_3d_rej_{compound_id}"] = False
+                                                st.rerun()
+                                        show_fullscreen_mol_rej()
+                                        st.session_state[f"show_fullscreen_3d_rej_{compound_id}"] = False
+                                except Exception as e:
+                                    st.warning(f"3D viewer unavailable: {e}")
+                                    st.code(smiles, language=None)
+                            else:
+                                st.info("Install py3Dmol for 3D visualization")
                     
                     with info_col:
                         # Rejection reason (prominent)
