@@ -31,19 +31,49 @@ for dir_path in [DATA_DIR, MODELS_DIR, LOGS_DIR, OUTPUTS_DIR]:
 # =============================================================================
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 NCBI_EMAIL = os.getenv("NCBI_EMAIL", "")
 
 # =============================================================================
-# LLM CONFIGURATION (for narrative/explainability summarization)
+# LLM CONFIGURATION
 # =============================================================================
 
+# LLM_PROVIDER can be "openai", "gemini", or "auto"
+# "auto" (default): Uses OpenAI if OPENAI_API_KEY is set, else falls back to Gemini
+_llm_provider_env = os.getenv("LLM_PROVIDER", "auto").lower()
+
+if _llm_provider_env == "auto":
+    # Auto-select: OpenAI preferred when available
+    if OPENAI_API_KEY:
+        LLM_PROVIDER = "openai"
+    elif GOOGLE_API_KEY:
+        LLM_PROVIDER = "gemini"
+    else:
+        LLM_PROVIDER = None  # No LLM available
+else:
+    LLM_PROVIDER = _llm_provider_env
+
 LLM_CONFIG = {
+    "openai": {
+        "model": "gpt-4o-mini",  # Cost-effective and fast
+        "temperature": 0.1,  # Low temperature for consistent extraction
+        "max_tokens": 2048,
+    },
+    "gemini": {
+        "model": "gemini-2.0-flash",
+        "temperature": 0.1,
+    },
+}
+
+# Explainability LLM config (Phi-3 for narrative summarization)
+EXPLAINABILITY_LLM_CONFIG = {
     "backend": os.getenv("LLM_BACKEND", "phi_local"),  # phi_local, gemini, mock
     "phi_model_id": "microsoft/Phi-3-mini-4k-instruct",
     # Deterministic settings - DO NOT MODIFY
     "temperature": 0.0,
     "max_tokens": 256,
 }
+
 
 # =============================================================================
 # CHEMISTRY FILTER THRESHOLDS (IMMUTABLE)
@@ -146,14 +176,13 @@ LOGGING = {
 
 def validate_config():
     """Validate critical configuration on startup."""
-    warnings = []
+    errors = []
     
-    # GOOGLE_API_KEY is now optional since we have Phi as primary
-    if not GOOGLE_API_KEY:
-        warnings.append("GOOGLE_API_KEY not set - Gemini fallback unavailable")
+    if not GOOGLE_API_KEY and not OPENAI_API_KEY:
+        errors.append("No LLM API key set - set OPENAI_API_KEY or GOOGLE_API_KEY in environment")
     
-    for warning in warnings:
-        import logging
-        logging.getLogger(__name__).warning(warning)
+    if errors:
+        raise ValueError(f"Configuration errors: {', '.join(errors)}")
     
     return True
+

@@ -160,10 +160,13 @@ def query_pubchem(compound_name: str) -> Optional[Dict]:
         properties = data.get("PropertyTable", {}).get("Properties", [])
         if properties:
             prop = properties[0]
-            return {
-                "cid": prop.get("CID"),
-                "smiles": prop.get("CanonicalSMILES"),
-            }
+            # PubChem may return CanonicalSMILES or ConnectivitySMILES depending on the property requested
+            smiles = prop.get("CanonicalSMILES") or prop.get("ConnectivitySMILES") or prop.get("IsomericSMILES")
+            if smiles:
+                return {
+                    "cid": prop.get("CID"),
+                    "smiles": smiles,
+                }
         
         return None
         

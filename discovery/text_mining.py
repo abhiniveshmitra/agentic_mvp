@@ -39,7 +39,7 @@ class CompoundMention:
 
 def extract_compounds(papers: List[Dict], target: str = None) -> List[Dict]:
     """
-    Extract compound mentions from paper abstracts using Gemini.
+    Extract compound mentions from paper abstracts using LLM (OpenAI or Gemini).
     
     IMPORTANT: This function ONLY extracts names and context.
     It NEVER generates SMILES or infers structures.
@@ -51,16 +51,32 @@ def extract_compounds(papers: List[Dict], target: str = None) -> List[Dict]:
     Returns:
         List of compound mention dictionaries
     """
-    import google.generativeai as genai
-    from config.settings import GOOGLE_API_KEY
+    from config.settings import LLM_PROVIDER, LLM_CONFIG, OPENAI_API_KEY, GOOGLE_API_KEY
     
-    if not GOOGLE_API_KEY:
-        logger.error("GOOGLE_API_KEY not configured")
+    if not LLM_PROVIDER:
+        logger.error("No LLM provider configured (set OPENAI_API_KEY or GOOGLE_API_KEY)")
         return []
     
-    # Configure Gemini
-    genai.configure(api_key=GOOGLE_API_KEY)
-    model = genai.GenerativeModel('gemini-2.0-flash')
+    # Initialize the appropriate LLM client
+    if LLM_PROVIDER == "openai":
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=OPENAI_API_KEY)
+            model_name = LLM_CONFIG["openai"]["model"]
+            logger.info(f"Using OpenAI {model_name} for compound extraction")
+        except ImportError:
+            logger.error("OpenAI package not installed. Run: pip install openai")
+            return []
+    else:  # gemini
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=GOOGLE_API_KEY)
+            client = genai.GenerativeModel(LLM_CONFIG["gemini"]["model"])
+            model_name = LLM_CONFIG["gemini"]["model"]
+            logger.info(f"Using Gemini {model_name} for compound extraction")
+        except ImportError:
+            logger.error("google-generativeai package not installed")
+            return []
     
     all_mentions = []
     
@@ -83,7 +99,8 @@ def extract_compounds(papers: List[Dict], target: str = None) -> List[Dict]:
         
         try:
             mentions = _extract_from_abstract(
-                model=model,
+                client=client,
+                provider=LLM_PROVIDER,
                 abstract=abstract,
                 paper_id=paper_id,
             )
@@ -98,15 +115,18 @@ def extract_compounds(papers: List[Dict], target: str = None) -> List[Dict]:
 
 
 def _extract_from_abstract(
-    model,
+    client,
+    provider: str,
     abstract: str,
     paper_id: str,
 ) -> List[Dict]:
     """
     Extract compound mentions from a single abstract.
     
-    Uses Gemini with strict constraints to prevent hallucination.
+    Uses OpenAI or Gemini with strict constraints to prevent hallucination.
     """
+    from config.settings import LLM_CONFIG
+    
     # Improved prompt with examples for better extraction
     prompt = f"""You are a biomedical text mining expert. Extract ALL drug and compound names from this scientific abstract.
 
@@ -137,10 +157,19 @@ ABSTRACT:
 JSON OUTPUT:"""
 
     try:
-        response = model.generate_content(prompt)
-        
-        # Parse response
-        text = response.text.strip()
+        # Call the appropriate API
+        if provider == "openai":
+            config = LLM_CONFIG["openai"]
+            response = client.chat.completions.create(
+                model=config["model"],
+                messages=[{"role": "user", "content": prompt}],
+                temperature=config["temperature"],
+                max_tokens=config["max_tokens"],
+            )
+            text = response.choices[0].message.content.strip()
+        else:  # gemini
+            response = client.generate_content(prompt)
+            text = response.text.strip()
         
         # Clean up markdown code blocks if present
         if text.startswith("```json"):
@@ -185,7 +214,7 @@ JSON OUTPUT:"""
         logger.warning(f"JSON parse error for paper {paper_id}: {e}")
         return []
     except Exception as e:
-        logger.warning(f"Gemini extraction error for paper {paper_id}: {e}")
+        logger.warning(f"LLM extraction error for paper {paper_id}: {e}")
         return []
 
 
@@ -203,14 +232,10 @@ def extract_target_context(
     Returns:
         Context dictionary or None
     """
-    import google.generativeai as genai
-    from config.settings import GOOGLE_API_KEY
+    from config.settings import LLM_PROVIDER, LLM_CONFIG, OPENAI_API_KEY, GOOGLE_API_KEY
     
-    if not GOOGLE_API_KEY:
+    if not LLM_PROVIDER:
         return None
-    
-    genai.configure(api_key=GOOGLE_API_KEY)
-    model = genai.GenerativeModel('gemini-2.0-flash')
     
     prompt = f"""Analyze this abstract for information about {target_name}.
 
@@ -233,8 +258,23 @@ ABSTRACT:
 JSON OUTPUT:"""
 
     try:
-        response = model.generate_content(prompt)
-        text = response.text.strip()
+        if LLM_PROVIDER == "openai":
+            from openai import OpenAI
+            client = OpenAI(api_key=OPENAI_API_KEY)
+            config = LLM_CONFIG["openai"]
+            response = client.chat.completions.create(
+                model=config["model"],
+                messages=[{"role": "user", "content": prompt}],
+                temperature=config["temperature"],
+                max_tokens=config["max_tokens"],
+            )
+            text = response.choices[0].message.content.strip()
+        else:  # gemini
+            import google.generativeai as genai
+            genai.configure(api_key=GOOGLE_API_KEY)
+            model = genai.GenerativeModel(LLM_CONFIG["gemini"]["model"])
+            response = model.generate_content(prompt)
+            text = response.text.strip()
         
         # Clean markdown
         if text.startswith("```json"):
@@ -249,3 +289,4 @@ JSON OUTPUT:"""
     except Exception as e:
         logger.warning(f"Target context extraction failed: {e}")
         return None
+
