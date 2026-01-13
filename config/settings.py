@@ -34,6 +34,18 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 NCBI_EMAIL = os.getenv("NCBI_EMAIL", "")
 
 # =============================================================================
+# LLM CONFIGURATION (for narrative/explainability summarization)
+# =============================================================================
+
+LLM_CONFIG = {
+    "backend": os.getenv("LLM_BACKEND", "phi_local"),  # phi_local, gemini, mock
+    "phi_model_id": "microsoft/Phi-3-mini-4k-instruct",
+    # Deterministic settings - DO NOT MODIFY
+    "temperature": 0.0,
+    "max_tokens": 256,
+}
+
+# =============================================================================
 # CHEMISTRY FILTER THRESHOLDS (IMMUTABLE)
 # =============================================================================
 
@@ -134,12 +146,14 @@ LOGGING = {
 
 def validate_config():
     """Validate critical configuration on startup."""
-    errors = []
+    warnings = []
     
+    # GOOGLE_API_KEY is now optional since we have Phi as primary
     if not GOOGLE_API_KEY:
-        errors.append("GOOGLE_API_KEY is not set in environment")
+        warnings.append("GOOGLE_API_KEY not set - Gemini fallback unavailable")
     
-    if errors:
-        raise ValueError(f"Configuration errors: {', '.join(errors)}")
+    for warning in warnings:
+        import logging
+        logging.getLogger(__name__).warning(warning)
     
     return True

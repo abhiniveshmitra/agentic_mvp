@@ -10,50 +10,50 @@ Rules (IMMUTABLE):
 - NEVER alter labels or scores
 - NEVER fabricate information not in the explanation
 
-This is LLM summarization mode only.
+This is LLM summarization mode only. Uses Phi-3 by default (via LLMProvider).
 """
 
 from typing import Dict, List, Optional
 import os
 
 from utils.logging import get_logger
+from utils.llm_provider import create_llm_provider, LLMProvider
 
 logger = get_logger(__name__)
 
-# Check for Google API Key
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 
 class NarrativeSummaryGenerator:
     """
     Generates human-readable narrative summaries for Stage-2 candidates.
     
-    Uses Gemini API for natural language generation, but ONLY for summarization.
-    Falls back to rule-based summaries if API unavailable.
+    Uses LLMProvider abstraction (default: Phi-3 local) for natural language generation.
+    Falls back to rule-based summaries if provider unavailable.
     """
     
-    def __init__(self, use_llm: bool = True):
+    def __init__(self, use_llm: bool = True, llm_backend: Optional[str] = None):
         """
         Initialize narrative generator.
         
         Args:
-            use_llm: Whether to use LLM for generation (requires API key)
+            use_llm: Whether to use LLM for generation
+            llm_backend: Override LLM backend (phi_local, gemini, mock)
         """
-        self.use_llm = use_llm and bool(GOOGLE_API_KEY)
+        self.use_llm = use_llm
+        self._provider: Optional[LLMProvider] = None
+        self._llm_backend = llm_backend
         
         if self.use_llm:
             try:
-                import google.generativeai as genai
-                genai.configure(api_key=GOOGLE_API_KEY)
-                self.model = genai.GenerativeModel('gemini-2.0-flash')
-                logger.info("NarrativeSummaryGenerator initialized with Gemini")
+                self._provider = create_llm_provider(llm_backend)
+                logger.info(f"NarrativeSummaryGenerator using {self._provider.provider_name}")
             except Exception as e:
-                logger.warning(f"Gemini init failed: {e}, using rule-based fallback")
+                logger.warning(f"LLM init failed: {e}, using rule-based fallback")
                 self.use_llm = False
-                self.model = None
+                self._provider = None
         else:
             logger.info("NarrativeSummaryGenerator initialized (rule-based mode)")
-            self.model = None
+
     
     def generate_narrative(self, candidate: Dict) -> str:
         """
@@ -87,11 +87,12 @@ class NarrativeSummaryGenerator:
         return narratives
     
     def _generate_with_llm(self, candidate: Dict) -> str:
-        """Generate narrative using Gemini API."""
+        """Generate narrative using LLM provider."""
         try:
             # Build context from explanation schema
             context = self._build_context(candidate)
             
+            # Summarization-only prompt - NO reasoning allowed
             prompt = f"""You are a scientific summarizer for drug discovery pipelines.
 
 Generate a 3-5 sentence summary for this molecule based STRICTLY on the provided data.
@@ -107,16 +108,17 @@ Here is the data:
 
 Generate a clear, scientific, but accessible summary:"""
             
-            response = self.model.generate_content(prompt)
+            response = self._provider.generate(prompt)
             
-            if response.text:
-                return response.text.strip()
+            if response:
+                return response.strip()
             else:
                 return self._generate_rule_based(candidate)
                 
         except Exception as e:
             logger.warning(f"LLM generation failed: {e}")
             return self._generate_rule_based(candidate)
+
     
     def _generate_rule_based(self, candidate: Dict) -> str:
         """Generate rule-based narrative (fallback)."""
@@ -148,8 +150,8 @@ Generate a clear, scientific, but accessible summary:"""
             )
         elif docking_status == "FLAG":
             parts.append(
-                "Docking suggests marginal fit - binding may require conformational "
-                "adjustments or induced fit effects not captured in rigid docking."
+                "Docking suggests marginal fit - caution is warranted as binding may require "
+                "conformational adjustments or induced fit effects not captured in rigid docking."
             )
         elif docking_status == "FAIL":
             error = docking.get("error", "structural incompatibility")
@@ -240,9 +242,10 @@ Generate a clear, scientific, but accessible summary:"""
         return "\n".join(lines)
 
 
-def create_narrative_generator(use_llm: bool = True) -> NarrativeSummaryGenerator:
+def create_narrative_generator(use_llm: bool = True, llm_backend: Optional[str] = None) -> NarrativeSummaryGenerator:
     """Factory function to create NarrativeSummaryGenerator."""
-    return NarrativeSummaryGenerator(use_llm=use_llm)
+    return NarrativeSummaryGenerator(use_llm=use_llm, llm_backend=llm_backend)
+
 
 
 # Quick test
